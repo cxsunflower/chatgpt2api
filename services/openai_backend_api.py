@@ -1819,12 +1819,30 @@ class OpenAIBackendAPI:
         return max(candidates, key=lambda item: item[0])[1] if candidates else ""
 
     def _extract_native_file_artifacts(self, detail: dict[str, Any]) -> list[EditableFileArtifact]:
-        return [
+        """Only the final assistant-to-user turn may publish file deliverables."""
+        finalized = []
+        for node in (detail.get("mapping") or {}).values():
+            message = (node or {}).get("message") or {}
+            if (message.get("author") or {}).get("role") != "assistant":
+                continue
+            if message.get("recipient") not in (None, "", "all"):
+                continue
+            if not message.get("end_turn"):
+                continue
+            if message.get("channel") not in (None, "", "final"):
+                continue
+            finalized.append(float(message.get("create_time") or 0))
+        if not finalized:
+            return []
+        cutoff = max(finalized)
+        artifacts = [
             artifact
             for artifact in self._extract_editable_artifacts(detail, EXPORT_FILE_RE)
             if artifact.author_role in {"assistant", "tool"}
+            and artifact.create_time >= cutoff
             and bool(artifact.name or artifact.sandbox_path or artifact.file_id or artifact.attachment_id)
         ]
+        return artifacts
 
     def _download_native_file_artifact(
             self,

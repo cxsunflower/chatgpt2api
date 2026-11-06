@@ -605,7 +605,11 @@ class EditableFileTaskService:
                 "sha256": hashlib.sha256(data).hexdigest(),
             })
             checked.append(resolved)
-        if {item.name for item in checked} != {item.name for item in staging.iterdir() if item.is_file()}:
+        unexpected = [
+            item for item in staging.iterdir()
+            if item.is_file() and item not in checked
+        ]
+        if unexpected:
             raise NativeFileError("publish_unexpected_files")
         if output_bundle == "zip" and len(checked) > 1:
             descriptor, temp_name = tempfile.mkstemp(prefix=".bundle-", suffix=".tmp", dir=staging)

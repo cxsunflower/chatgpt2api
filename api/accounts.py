@@ -1776,8 +1776,8 @@ def create_router() -> APIRouter:
                 )
                 if body.sync_models:
                     await run_in_threadpool(
-                        account_service.refresh_all_account_models,
-                        limit=0,
+                        account_service.sync_account_models_for_tokens,
+                        access_tokens,
                     )
                 updated_ids, removed_ids = _partition_account_ids(target_ids)
                 result = _account_mutation_payload(

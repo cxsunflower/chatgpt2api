@@ -104,16 +104,11 @@ def _image_models_from_accounts(accounts: list[dict[str, Any]]) -> list[str]:
 
 def _account_models(accounts: list[dict[str, Any]]) -> list[ModelAccountView]:
     result: list[ModelAccountView] = []
-    for account in accounts:
+    for index, account in enumerate(accounts, start=1):
         if not isinstance(account, dict):
             continue
-        account_id = str(
-            account.get("account_id")
-            or account.get("user_id")
-            or account.get("email")
-            or ""
-        ).strip()
-        label = str(account.get("email") or account.get("type") or account_id).strip()
+        account_id = "account-%d" % index
+        label = str(account.get("type") or "account").strip() or "account"
         result.append(
             ModelAccountView(
                 account_id=account_id,

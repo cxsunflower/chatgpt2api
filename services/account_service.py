@@ -4866,7 +4866,6 @@ class AccountService:
                     if account is not None:
                         synced += 1
                         result_account = account
-                        self.sync_account_models(token)
                         event_status = "success"
                         event_message = "\u8d26\u53f7\u4e0e\u989d\u5ea6\u5df2\u540c\u6b65"
                     else:
@@ -4926,17 +4925,18 @@ class AccountService:
         if not token:
             return []
 
-    def refresh_all_account_models(self, *, limit: int = 0) -> dict[str, Any]:
-        """Refresh model inventories for a bounded batch of accounts."""
-        tokens = self.list_tokens()
-        selected = tokens[:limit] if limit > 0 else tokens
-        max_workers = account_processing_worker_count(len(selected))
+    def sync_account_models_for_tokens(self, access_tokens: list[str]) -> dict[str, Any]:
+        """Bounded parallel model sync for an explicit account selection."""
+        tokens = list(dict.fromkeys(
+            str(token or "").strip() for token in access_tokens if str(token or "").strip()
+        ))
+        if not tokens:
+            return {"synced": 0, "errors": [], "items": self.list_accounts()}
+        max_workers = account_processing_worker_count(len(tokens))
         synced = 0
         errors: list[dict[str, Any]] = []
-        if not selected:
-            return {"synced": 0, "errors": errors, "items": self.list_accounts()}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self.sync_account_models, token): token for token in selected}
+            futures = {executor.submit(self.sync_account_models, token): token for token in tokens}
             for future in as_completed(futures):
                 token = futures[future]
                 try:
@@ -4949,6 +4949,12 @@ class AccountService:
                 else:
                     synced += 1 if models else 0
         return {"synced": synced, "errors": errors, "items": self.list_accounts()}
+
+    def refresh_all_account_models(self, *, limit: int = 0) -> dict[str, Any]:
+        """Compatibility alias for refreshing the complete account set."""
+        tokens = self.list_tokens()
+        selected = tokens[:limit] if limit > 0 else tokens
+        return self.sync_account_models_for_tokens(selected)
         now = datetime.now(timezone.utc).isoformat()
         try:
             from services.account_processing import account_processing_slot
