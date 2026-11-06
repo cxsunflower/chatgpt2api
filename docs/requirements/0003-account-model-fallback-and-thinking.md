@@ -56,5 +56,8 @@ from `/v1/models` fallback names.
   on/off, repeated client task IDs, and downloaded-byte verification.
 - [x] Contract checks cover model fallback exhaustion, accepted-conversation
   boundaries, original-account recovery, and authenticated download isolation.
-- [ ] Production deployment and QQ delivery of the revised implementation,
-  real model fallback, and user acceptance remain to be verified.
+- [x] Production deployment, native file byte verification, and image/file QQ
+  delivery receipts in the authorized test group.
+- [x] Browser checks cover eight console pages, desktop/mobile layouts, and
+  persisted thinking follow/on/off state using isolated data.
+- [ ] Real model fallback and user acceptance remain to be verified.
