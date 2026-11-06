@@ -47,6 +47,7 @@ from services.image_failure import (
     classify_image_exception,
     classify_upstream_message,
     classify_task_failure,
+    current_conversation_turn,
     image_failure,
     is_terminal_message_status,
     merge_message_failure,
@@ -1615,6 +1616,7 @@ class OpenAIBackendAPI:
                         conversation_id = conversation_id or self._find_editable_value(payload, "conversation_id")
                         failure = classify_upstream_message(parsed)
                         if failure is not None and failure.code != "upstream_text_reply":
+                            self._raise_native_tool_limit(failure, [parsed])
                             raise EditableFileFailureError(failure=failure)
                 except Exception as exc:
                     if not conversation_id or not self._native_stream_recoverable(exc):
@@ -1765,6 +1767,7 @@ class OpenAIBackendAPI:
             else:
                 failure = classify_conversation_failure(detail)
                 if failure is not None and failure.code not in {"upstream_text_reply", "image_model_not_found"}:
+                    self._raise_native_tool_limit(failure, current_conversation_turn(detail))
                     raise EditableFileFailureError(failure=failure)
                 if self._native_file_detail_terminal(detail):
                     return detail
@@ -1772,6 +1775,24 @@ class OpenAIBackendAPI:
             if remaining <= 0:
                 raise last_error or NativeFileError("generation_poll_timeout")
             time.sleep(min(max(0.1, float(poll_interval_secs)), remaining))
+
+    @staticmethod
+    def _raise_native_tool_limit(failure: ImageFailure, messages) -> None:
+        # Only refine the generic tool failure. Authentication/policy failures
+        # retain their priority; user text and previous turns are not evidence.
+        if failure.code != "image_tool_error":
+            return
+        for value in messages:
+            if not isinstance(value, dict):
+                continue
+            message = value.get("message", value)
+            if not isinstance(message, dict):
+                continue
+            author, content = message.get("author"), message.get("content")
+            if (isinstance(author, dict) and author.get("role") == "tool"
+                    and isinstance(content, dict) and content.get("content_type") == "system_error"
+                    and content.get("name") == "ChatGPTAgentToolRateLimitException"):
+                raise NativeFileError("tool_rate_limited")
 
     def recover_file(
         self,

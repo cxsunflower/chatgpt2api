@@ -440,6 +440,9 @@ class EditableFileTaskService:
                 stored_task["model"] = selected_model
                 self._update_task(key, model=selected_model, account_email=account_email)
                 try:
+                    # Selection is least-recently-used: failed attempts also consume
+                    # a turn, otherwise a tool-limited account is selected forever.
+                    account_service.mark_text_used(token)
                     with OpenAIBackendAPI(token) as backend:
                         if kind == "file":
                             result = backend.export_file(
@@ -462,7 +465,6 @@ class EditableFileTaskService:
                             and time.monotonic() < deadline and model_unavailable_from_error(exc)):
                         continue
                     raise
-            account_service.mark_text_used(token)
             if kind == "file":
                 if not getattr(result, "files", []):
                     text = clean_generated_text(getattr(result, "text", ""))

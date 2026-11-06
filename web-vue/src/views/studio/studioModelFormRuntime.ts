@@ -33,6 +33,9 @@ export function useStudioModelFormRuntime() {
     size: DEFAULT_IMAGE_SIZE,
     quality: DEFAULT_IMAGE_QUALITY,
     n: 1,
+    outputFormat: 'auto',
+    frameCount: null,
+    frameDurationMs: null,
   })
 
   const chatModelOptions = computed(() => (
@@ -47,6 +50,10 @@ export function useStudioModelFormRuntime() {
       capabilities?.image_upscale
       || capabilities?.high_resolution_image_models.includes(imageForm.model),
     )
+  })
+  const imageGifEnabled = computed(() => catalog.value?.capabilities.gif_models.includes(imageForm.model) ?? false)
+  watch(imageGifEnabled, (enabled) => {
+    if (!enabled && imageForm.outputFormat === 'gif') imageForm.outputFormat = 'auto'
   })
 
   watch(chatModel, (model) => setStringPreference(preferenceKeys.studioChatModel, model || 'auto'))
@@ -80,6 +87,7 @@ export function useStudioModelFormRuntime() {
     imageForm,
     imageModelOptions,
     imageHighResolutionEnabled,
+    imageGifEnabled,
     loadModelCatalog,
   }
 }

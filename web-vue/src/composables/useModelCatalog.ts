@@ -25,6 +25,8 @@ function validateCatalog(payload: ModelCatalogResponse | null | undefined): Mode
     || !Array.isArray(payload.all_models)
     || !payload.defaults
     || !payload.capabilities
+    || !Array.isArray(payload.capabilities.gif_models)
+    || payload.capabilities.gif_models.some((model) => typeof model !== 'string' || !payload.image_models.includes(model))
     || !payload.source
     || !Array.isArray(payload.account_models)
     || !payload.fallback_chains

@@ -20,6 +20,7 @@ class ModelCatalogDefaults(_StrictModel):
 class ModelCatalogCapabilities(_StrictModel):
     image_upscale: bool = False
     high_resolution_image_models: tuple[str, ...] = ()
+    gif_models: tuple[str, ...] = ()
 
 
 class ModelCatalogSource(_StrictModel):
@@ -75,6 +76,8 @@ class ModelCatalogView(_StrictModel):
             raise ValueError("default image model must be listed in image_models")
 
         image_models = set(self.image_models)
+        if any(model not in image_models for model in self.capabilities.gif_models):
+            raise ValueError("GIF models must be listed in image_models")
         if any(
             model not in image_models
             for model in self.capabilities.high_resolution_image_models

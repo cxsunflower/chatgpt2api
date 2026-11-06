@@ -1,6 +1,6 @@
 import apiClient from './client'
 
-export type EditableFileKind = 'ppt' | 'psd'
+export type EditableFileKind = 'ppt' | 'psd' | 'file'
 export type EditableFileTaskStatus = 'queued' | 'running' | 'success' | 'error'
 export type EditableFileTaskTone = 'muted' | 'warning' | 'success' | 'danger'
 
@@ -8,6 +8,7 @@ export interface EditableFileTaskResult {
   conversation_id: string
   primary_url?: string
   zip_url?: string
+  files?: Array<{ name: string; url: string; mime: string; size: number }>
 }
 
 interface EditableFileTaskBase {
@@ -56,6 +57,9 @@ export interface CreateEditableFileTaskInput {
   prompt: string
   base64Images?: string[]
   clientTaskId?: string
+  model?: string
+  thinkingEnabled?: boolean
+  thinkingEffort?: string
 }
 
 type JsonObject = Record<string, unknown>
@@ -104,7 +108,7 @@ function expectNonNegativeInteger(value: unknown, path: string): number {
 }
 
 function expectKind(value: unknown, path: string): EditableFileKind {
-  if (value !== 'ppt' && value !== 'psd') contractError(path, 'ppt | psd')
+  if (value !== 'ppt' && value !== 'psd' && value !== 'file') contractError(path, 'ppt | psd | file')
   return value
 }
 
@@ -118,10 +122,20 @@ function expectStatus(value: unknown, path: string): EditableFileTaskStatus {
 
 function parseResult(value: unknown, path: string): EditableFileTaskResult {
   const result = expectObject(value, path)
+  if (result.files !== undefined && !Array.isArray(result.files)) contractError(`${path}.files`, 'array')
   return {
     conversation_id: expectString(result.conversation_id, `${path}.conversation_id`),
     primary_url: optionalString(result.primary_url, `${path}.primary_url`),
     zip_url: optionalString(result.zip_url, `${path}.zip_url`),
+    files: (result.files as unknown[] | undefined)?.map((value, index) => {
+      const file = expectObject(value, `${path}.files[${index}]`)
+      return {
+        name: expectString(file.name, `${path}.files[${index}].name`),
+        url: expectString(file.url, `${path}.files[${index}].url`),
+        mime: expectString(file.mime, `${path}.files[${index}].mime`),
+        size: expectNonNegativeInteger(file.size, `${path}.files[${index}].size`),
+      }
+    }),
   }
 }
 
@@ -188,6 +202,24 @@ function createClientTaskId(kind: EditableFileKind) {
 
 export const editableFileTasksApi = {
   create: async (input: CreateEditableFileTaskInput) => {
+    if (input.kind === 'file') {
+      const attachments = (input.base64Images || []).map((data, index) => {
+        const mime = /^data:image\/(png|jpeg|webp|gif);base64,/.exec(data)?.[1]
+        if (!mime) throw new Error('参考图格式不支持')
+        return { type: 'file', file: { filename: `reference-${index + 1}.${mime}`, file_data: data } }
+      })
+      const response = expectObject(await apiClient.post<Record<string, unknown>, unknown>('/v1/chat/completions', {
+        model: input.model,
+        stream: false,
+        output_type: 'file',
+        output_bundle: 'separate',
+        thinking_enabled: input.thinkingEnabled,
+        reasoning_effort: input.thinkingEffort,
+        client_task_id: input.clientTaskId || createClientTaskId(input.kind),
+        messages: [{ role: 'user', content: [{ type: 'text', text: input.prompt }, ...attachments] }],
+      }), 'response')
+      return parseTask(response.file_task, 'response.file_task')
+    }
     const response = await apiClient.post<Record<string, unknown>, unknown>('/v1/editable-file-tasks', {
       kind: input.kind,
       prompt: input.prompt,

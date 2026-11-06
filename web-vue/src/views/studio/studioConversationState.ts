@@ -1,4 +1,5 @@
 import { normalizeImageCount } from '@/api/imageTasks'
+import { normalizeStudioFileKind } from './studioComposerRuntime'
 import type {
   StudioConversation,
   StudioConversationBadgeState,
@@ -195,7 +196,7 @@ function normalizeStudioMessage(item: unknown): StudioMessage | null {
     taskId: taskId || undefined,
     fileTaskId: fileTaskId || undefined,
     fileTaskDeleted: mode === 'file' && fileTaskDeleted ? true : undefined,
-    fileKind: mode === 'file' && raw.fileKind === 'psd' ? 'psd' : mode === 'file' ? 'ppt' : undefined,
+    fileKind: mode === 'file' ? normalizeStudioFileKind(String(raw.fileKind || '')) : undefined,
     error: cleanStudioText(raw.error) || undefined,
     attachments: Array.isArray(raw.attachments) ? raw.attachments.map(cleanStudioText).filter(Boolean).slice(0, 8) : undefined,
     referenceImages: normalizeStudioReferenceImages(raw.referenceImages),

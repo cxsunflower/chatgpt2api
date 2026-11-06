@@ -8,7 +8,7 @@ export function normalizeStudioComposeMode(value: string): StudioComposeMode {
 }
 
 export function normalizeStudioFileKind(value: string): StudioFileKind {
-  return value === 'psd' ? 'psd' : 'ppt'
+  return value === 'file' || value === 'psd' ? value : 'ppt'
 }
 
 export function useStudioComposerRuntime() {

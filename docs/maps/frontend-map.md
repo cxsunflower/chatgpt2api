@@ -27,6 +27,14 @@ The route source is
 Each page owns its responsive composition and has one explicit scroll owner per
 scrolling region.
 
+Studio's image composer consumes `capabilities.gif_models` and forwards optional
+frame hints through `imageTasksApi` for generation and editing. Switching to a
+non-GIF format omits stale hints. Its generic file mode uses
+`/v1/chat/completions` with `output_type=file`, an explicit text model, thinking
+controls and original reference files. Existing file-task polling owns completion;
+message cards and recent tasks expose each published filename. PPT/PSD keep their
+existing specialized submission path.
+
 ## Data path
 
 ```mermaid

@@ -102,6 +102,18 @@
 
                   <div v-if="message.fileTask?.status === 'success'" class="studio-file-task-actions">
                     <button
+                      v-for="file in message.fileTask.result.files || []"
+                      :key="file.url"
+                      type="button"
+                      class="studio-file-task-action"
+                      :disabled="isDownloadingFileTask"
+                      @click="handleFileTaskDownload(message, file.url, 'file')"
+                    >
+                      <Icon icon="lucide:download" class="h-3.5 w-3.5" />
+                      {{ file.name }}
+                    </button>
+                    <button
+                      v-if="!message.fileTask.result.files?.length && message.fileTask.result.primary_url"
                       type="button"
                       class="studio-file-task-action"
                       :disabled="isDownloadingFileTask"
@@ -111,6 +123,7 @@
                       下载 {{ fileKindLabel(message) }}
                     </button>
                     <button
+                      v-if="message.fileTask.result.zip_url"
                       type="button"
                       class="studio-file-task-action"
                       :disabled="isDownloadingFileTask"
@@ -445,7 +458,8 @@ function isFileTaskPending(message: StudioMessageView) {
 }
 
 function fileKindLabel(message: StudioMessageView) {
-  return String(message.fileTask?.kind || message.fileKind || 'ppt').toUpperCase()
+  const kind = message.fileTask?.kind || message.fileKind || 'ppt'
+  return kind === 'file' ? '文件' : kind.toUpperCase()
 }
 
 function fileTaskTitle(message: StudioMessageView) {

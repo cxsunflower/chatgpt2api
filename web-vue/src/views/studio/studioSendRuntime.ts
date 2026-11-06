@@ -411,7 +411,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     prompt: string,
     kind: StudioFileKind,
   ) {
-    const label = kind === 'psd' ? 'PSD' : 'PPT'
+    const label = kind === 'file' ? '通用' : kind.toUpperCase()
     const assistantMessage = messageRuntime.addMessage(conversation, {
       role: 'assistant',
       mode: 'file',
@@ -424,6 +424,9 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       const task = await editableFileTasksApi.create({
         kind,
         prompt,
+        model: chatModel.value,
+        thinkingEnabled: input.chatThinkingEnabled.value ?? undefined,
+        thinkingEffort: chatReasoningEffort.value,
         base64Images: referenceRuntime.references.value.map((reference) => reference.dataUrl).filter(Boolean),
       })
       assistantMessage.fileTaskId = task.id
@@ -455,6 +458,10 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
   }
 
   function validateFileRequest(mode: StudioComposeMode) {
+    if (mode === 'file' && composerRuntime.fileKind.value === 'file' && chatModel.value === 'auto') {
+      toast.error('文件生成需要选择具体模型')
+      return false
+    }
     if (mode !== 'file' || composerRuntime.fileKind.value !== 'psd' || referenceRuntime.references.value.length) {
       return true
     }

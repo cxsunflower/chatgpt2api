@@ -879,7 +879,7 @@ def classify_task_failure(task: Any) -> ImageFailure | None:
     return None
 
 
-def _current_conversation_turn(data: Any) -> list[Mapping[str, Any]]:
+def current_conversation_turn(data: Any) -> list[Mapping[str, Any]]:
     data_map = _mapping(data)
     mapping = _mapping(data_map.get("mapping"))
     messages: list[Mapping[str, Any]] = []
@@ -922,7 +922,7 @@ def _current_conversation_turn(data: Any) -> list[Mapping[str, Any]]:
 
 
 def terminal_assistant_text(data: Any) -> str:
-    for message in reversed(_current_conversation_turn(data)):
+    for message in reversed(current_conversation_turn(data)):
         role = str(_mapping(message.get("author")).get("role") or "").strip().lower()
         content = _mapping(message.get("content"))
         content_type = str(content.get("content_type") or "").strip().lower()
@@ -938,7 +938,7 @@ def terminal_assistant_text(data: Any) -> str:
 
 
 def classify_conversation_failure(data: Any) -> ImageFailure | None:
-    current_turn = _current_conversation_turn(data)
+    current_turn = current_conversation_turn(data)
     if any(_message_has_image_output(message) for message in current_turn):
         return None
 

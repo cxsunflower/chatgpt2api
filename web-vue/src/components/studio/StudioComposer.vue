@@ -107,7 +107,7 @@
               <span>Skill</span>
             </StudioToolbarSelectButton>
 
-            <template v-if="mode === 'chat'">
+            <template v-if="mode === 'chat' || (mode === 'file' && fileKind === 'file')">
               <div class="chat-settings-anchor chat-settings-anchor--chat">
                 <FloatingActionMenu
                   :label="chatSettingsLabel"
@@ -165,6 +165,33 @@
                     </div>
                   </div>
                   <div class="studio-size-section">
+                    <div class="studio-size-label">输出格式</div>
+                    <div class="studio-choice-grid is-quality">
+                      <Button
+                        v-for="option in imageFormatOptions"
+                        :key="option.value"
+                        size="sm"
+                        :variant="imageForm.outputFormat === option.value ? 'primary' : 'outline'"
+                        :disabled="option.value === 'gif' && !imageGifEnabled"
+                        block
+                        root-class="studio-choice-button"
+                        @click="$emit('update:imageOutputFormat', option.value)"
+                      >{{ option.label }}</Button>
+                    </div>
+                    <p v-if="!imageGifEnabled" class="studio-size-current">当前模型未开启 GIF 请求。</p>
+                    <div v-if="imageForm.outputFormat === 'gif'" class="studio-gif-fields">
+                      <label>
+                        <span class="studio-size-label">帧数（可选）</span>
+                        <input :value="imageForm.frameCount ?? ''" type="number" min="2" step="1" placeholder="由模型决定" class="ui-input-sm w-full" @input="updateFrameOption('count', $event)" />
+                      </label>
+                      <label>
+                        <span class="studio-size-label">单帧毫秒（可选）</span>
+                        <input :value="imageForm.frameDurationMs ?? ''" type="number" min="1" step="1" placeholder="由模型决定" class="ui-input-sm w-full" @input="updateFrameOption('duration', $event)" />
+                      </label>
+                      <p class="studio-size-current">这些值用于请求动画；若上游返回静态图，本次任务会明确失败。</p>
+                    </div>
+                  </div>
+                  <div class="studio-size-section">
                     <div class="studio-size-label">数量</div>
                     <div class="studio-choice-grid is-count">
                       <Button
@@ -217,7 +244,7 @@
               </div>
             </template>
 
-            <template v-else-if="mode === 'file'">
+            <template v-if="mode === 'file'">
               <div class="chat-select-wrap chat-select-wrap--file">
                 <GroupedSelectMenu
                   v-model="fileKindValue"
@@ -289,6 +316,7 @@ import {
   formatImageSizeLabel,
   resolveImageSizePresets,
   type ImageSizeResolution,
+  type ImageOutputFormat,
 } from '@/api/imageTasks'
 import type { StudioComposeMode, StudioFileKind, StudioImageForm, StudioReference } from './types'
 
@@ -308,6 +336,7 @@ const props = defineProps<{
   chatModelOptions: string[]
   imageModelOptions: string[]
   imageHighResolutionEnabled: boolean
+  imageGifEnabled: boolean
   references: StudioReference[]
   isSending: boolean
   isStreaming: boolean
@@ -324,6 +353,9 @@ const emit = defineEmits<{
   'update:imageModel': [model: string]
   'update:imageSize': [size: string]
   'update:imageQuality': [quality: string]
+  'update:imageOutputFormat': [format: ImageOutputFormat]
+  'update:imageFrameCount': [count: number | null]
+  'update:imageFrameDuration': [duration: number | null]
   'update:imageCount': [count: number]
   submit: []
   stop: []
@@ -342,6 +374,18 @@ const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const settingsAnchorRef = ref<HTMLElement | null>(null)
 const isDragging = ref(false)
+const imageFormatOptions: { label: string; value: ImageOutputFormat }[] = [
+  { label: '自动', value: 'auto' }, { label: 'PNG', value: 'png' },
+  { label: 'JPEG', value: 'jpeg' }, { label: 'WebP', value: 'webp' },
+  { label: 'GIF 动图', value: 'gif' },
+]
+
+function updateFrameOption(kind: 'count' | 'duration', event: Event) {
+  const input = event.target as HTMLInputElement
+  const value = Number.isFinite(input.valueAsNumber) ? input.valueAsNumber : null
+  if (kind === 'count') emit('update:imageFrameCount', value)
+  else emit('update:imageFrameDuration', value)
+}
 const settingsOpen = ref(false)
 let textareaResizeFrame = 0
 let composerResizeObserver: ResizeObserver | null = null
@@ -354,6 +398,7 @@ const modeOptions: Array<{ label: string; value: StudioComposeMode }> = [
 ]
 
 const fileKindOptions: Array<{ label: string; value: StudioFileKind }> = [
+  { label: '通用文件 / GIF', value: 'file' },
   { label: 'PPT', value: 'ppt' },
   { label: 'PSD', value: 'psd' },
 ]
@@ -396,7 +441,7 @@ const fileKindValue = computed({
   get: () => props.fileKind,
   set: (value: string | string[]) => {
     const next = String(Array.isArray(value) ? value[0] : value || props.fileKind)
-    if (next === 'ppt' || next === 'psd') emit('update:fileKind', next)
+    if (next === 'ppt' || next === 'psd' || next === 'file') emit('update:fileKind', next)
   },
 })
 
@@ -521,6 +566,7 @@ const imageSummaryLabel = computed(() => {
 const imagePlaceholder = computed(() => props.references.length ? '描述你想如何修改参考图' : '输入你想生成的画面，也可以粘贴或拖入参考图')
 const chatPlaceholder = computed(() => props.references.length ? '描述你想让模型识别或分析的图片' : '输入消息，Enter 发送，Shift+Enter 换行')
 const filePlaceholder = computed(() => {
+  if (props.fileKind === 'file') return '描述要生成的文件；例如用 Python 生成 12 帧、每帧 150 毫秒的 whale.gif 动图'
   const kind = props.fileKind === 'psd' ? 'PSD' : 'PPT'
   return props.references.length
     ? `描述你想根据参考图生成的 ${kind}`
@@ -534,7 +580,7 @@ const placeholderText = computed(() => {
 })
 const submitAriaLabel = computed(() => {
   if (props.mode === 'image') return '提交图片任务'
-  if (props.mode === 'file') return `生成 ${props.fileKind === 'psd' ? 'PSD' : 'PPT'}`
+  if (props.mode === 'file') return props.fileKind === 'file' ? '生成文件' : `生成 ${props.fileKind.toUpperCase()}`
   return '发送消息'
 })
 const submitLabel = computed(() => {
@@ -1090,6 +1136,17 @@ onBeforeUnmount(() => {
 
 .studio-size-section + .studio-size-section {
   margin-top: 0.85rem;
+}
+
+.studio-gif-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.5rem;
+  margin-top: 0.625rem;
+}
+
+.studio-gif-fields > p {
+  grid-column: 1 / -1;
 }
 
 .studio-size-label {

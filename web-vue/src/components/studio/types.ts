@@ -1,5 +1,8 @@
+import type { ImageOutputFormat } from '@/api/imageTasks'
+import type { EditableFileKind } from '@/api/editableFileTasks'
+
 export type StudioComposeMode = 'chat' | 'image' | 'search' | 'file'
-export type StudioFileKind = 'ppt' | 'psd'
+export type StudioFileKind = EditableFileKind
 export type StudioRole = 'user' | 'assistant'
 export type StudioMessageStatus = 'sending' | 'streaming' | 'queued' | 'running' | 'done' | 'error'
 export type StudioConversationBadgeState = 'running' | 'done' | 'error'
@@ -85,6 +88,9 @@ export interface StudioImageForm {
   size: string
   quality: string
   n: number
+  outputFormat: ImageOutputFormat
+  frameCount: number | null
+  frameDurationMs: number | null
 }
 
 export interface StudioPreviewImage {

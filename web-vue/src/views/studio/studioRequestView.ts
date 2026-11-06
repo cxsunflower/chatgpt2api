@@ -101,9 +101,15 @@ export async function createStudioImageTask(input: StudioImageTaskInput): Promis
   const n = normalizeImageCount(input.imageForm.n)
   const size = input.imageForm.size
   const quality = input.imageForm.quality || DEFAULT_IMAGE_QUALITY
+  const format = {
+    outputFormat: input.imageForm.outputFormat,
+    frameCount: input.imageForm.frameCount,
+    frameDurationMs: input.imageForm.frameDurationMs,
+  }
 
   return input.files.length
     ? imageTasksApi.createEdit({
+      ...format,
       prompt: input.prompt,
       files: input.files,
       model,
@@ -112,6 +118,7 @@ export async function createStudioImageTask(input: StudioImageTaskInput): Promis
       quality,
     })
     : imageTasksApi.createGeneration({
+      ...format,
       prompt: input.prompt,
       model,
       n,
@@ -136,7 +143,7 @@ function buildStudioChatContextContent(message: StudioMessage): OpenAIV1ChatMess
 function buildStudioChatContextText(message: StudioMessage) {
   if (message.role === 'user' && message.mode === 'image') return `画图请求：${message.content}`
   if (message.role === 'user' && message.mode === 'search') return `搜索请求：${message.content}`
-  if (message.role === 'user' && message.mode === 'file') return `${message.fileKind === 'psd' ? 'PSD' : 'PPT'} 文件请求：${message.content}`
+  if (message.role === 'user' && message.mode === 'file') return `${message.fileKind === 'file' ? '通用' : message.fileKind === 'psd' ? 'PSD' : 'PPT'} 文件请求：${message.content}`
   return message.content
 }
 

@@ -54,7 +54,7 @@
 
             <div class="recent-file-task-info">
               <div class="recent-file-task-heading">
-                <strong>{{ task.kind.toUpperCase() }} 文件任务</strong>
+                <strong>{{ task.kind === 'file' ? '通用' : task.kind.toUpperCase() }} 文件任务</strong>
                 <MetaChip size="xs" :tone="task.status_tone">
                   {{ task.status_label }}
                 </MetaChip>
@@ -71,7 +71,18 @@
               class="recent-file-task-actions"
             >
               <button
-                v-if="task.can_download && task.result?.primary_url"
+                v-for="file in task.status === 'success' && task.can_download ? task.result.files || [] : []"
+                :key="file.url"
+                type="button"
+                class="recent-file-task-download"
+                :disabled="isDownloadingFileTask"
+                @click="handleDownload(task, file.url, 'file')"
+              >
+                <Icon icon="lucide:download" class="h-3.5 w-3.5" />
+                {{ file.name }}
+              </button>
+              <button
+                v-if="task.can_download && !task.result?.files?.length && task.result?.primary_url"
                 type="button"
                 class="recent-file-task-download"
                 :disabled="isDownloadingFileTask"
@@ -200,7 +211,7 @@ async function handleCopyError(task: EditableFileTask) {
 async function handleDelete(task: EditableFileTask) {
   const confirmed = await confirmDialog.ask({
     title: '删除文件任务',
-    message: `确认删除这条 ${task.kind.toUpperCase()} 文件任务记录及其本地产物？此操作不可恢复。`,
+    message: `确认删除这条 ${task.kind === 'file' ? '通用' : task.kind.toUpperCase()} 文件任务记录及其本地产物？此操作不可恢复。`,
     confirmText: '删除',
     cancelText: '取消',
   })

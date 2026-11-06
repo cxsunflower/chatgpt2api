@@ -50,7 +50,9 @@ backend catalog. Explicit catalog configuration still takes precedence over
 the built-in list. No `exact` aliases are added.
 
 The persisted `gif_models` setting controls GIF eligibility per image model.
-It defaults to the three 2.6 aliases and is projected through `/api/settings`.
+It defaults to the three 2.6 aliases and is projected through `/api/settings`
+and the model catalog's `capabilities.gif_models` (intersected with the published
+image models). This is request permission, not proof of upstream animation output.
 Image requests carry optional `output_format`, `frame_count`, and
 `frame_duration_ms` values through the shared image execution request.
 `output_format` accepts `gif`, `png`, `jpg`/`jpeg`, and `webp`. GIF bytes bypass
@@ -60,6 +62,13 @@ multi-image behavior is unchanged.
 
 GIF success requires an actual GIF with at least two frames. Static output raises
 `image_output_format_mismatch` and does not switch accounts or regenerate.
+Both generation and edit Image Tasks retain optional frame hints through queue
+spooling; non-GIF prompts omit these hints.
+
+Generic chat file generation can produce GIFs using the upstream native code
+tool. `EditableFileTaskService` marks an account used before the upstream attempt,
+including failed attempts. A structured current-turn native tool limit is exposed
+as `native_file:tool_rate_limited`; it does not trigger generation replay.
 
 The 2.5 identifiers use the existing `auto` upstream Web model slug. They are
 compatibility names and do not force a particular official API image engine or

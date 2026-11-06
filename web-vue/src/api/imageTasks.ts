@@ -2,6 +2,7 @@ import apiClient from './client'
 
 export type ImageTaskStatus = 'queued' | 'running' | 'success' | 'partial_success' | 'failed' | 'text_review'
 export type ImageTaskMode = 'generate' | 'edit'
+export type ImageOutputFormat = 'auto' | 'png' | 'jpeg' | 'webp' | 'gif'
 
 export interface ImageTaskAsset {
   url: string
@@ -51,6 +52,9 @@ export interface CreateGenerationTaskInput {
   n?: number
   size?: string
   quality?: string
+  outputFormat?: ImageOutputFormat
+  frameCount?: number | null
+  frameDurationMs?: number | null
   clientTaskId?: string
 }
 
@@ -341,6 +345,9 @@ function createEditForm(input: CreateEditTaskInput) {
   form.append('quality', input.quality || DEFAULT_IMAGE_QUALITY)
   const size = requestSize(input.size)
   if (size) form.append('size', size)
+  for (const [key, value] of Object.entries(imageFormatFields(input))) {
+    form.append(key, String(value))
+  }
 
   const imageUrls = normalizeUrlList(input.imageUrls)
   if (imageUrls.length === 1) {
@@ -365,6 +372,16 @@ export function imageAssetUrl(asset: ImageTaskAsset) {
   return base64 ? `data:image/png;base64,${base64}` : ''
 }
 
+function imageFormatFields(input: CreateGenerationTaskInput): Record<string, string | number> {
+  const fields: Record<string, string | number> = {}
+  if (input.outputFormat && input.outputFormat !== 'auto') fields.output_format = input.outputFormat
+  if (input.outputFormat === 'gif') {
+    if (input.frameCount != null) fields.frame_count = input.frameCount
+    if (input.frameDurationMs != null) fields.frame_duration_ms = input.frameDurationMs
+  }
+  return fields
+}
+
 export const imageTasksApi = {
   list: async (ids?: string[]) => {
     const params = ids?.length ? { ids: ids.join(',') } : undefined
@@ -380,6 +397,7 @@ export const imageTasksApi = {
       n: normalizeImageCount(input.n),
       size: requestSize(input.size),
       quality: input.quality || DEFAULT_IMAGE_QUALITY,
+      ...imageFormatFields(input),
     })
     return parseImageTask(response)
   },

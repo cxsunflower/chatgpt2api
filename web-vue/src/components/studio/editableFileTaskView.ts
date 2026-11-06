@@ -13,7 +13,7 @@ export function editableFileTaskDownloadFilename(
 ) {
   const fallback = type === 'zip'
     ? `${task.kind}-${task.id}.zip`
-    : `${task.kind}-${task.id}.${task.kind === 'ppt' ? 'pptx' : 'psd'}`
+    : `${task.kind}-${task.id}.${task.kind === 'file' ? 'bin' : task.kind === 'ppt' ? 'pptx' : 'psd'}`
   const filename = downloadFilenameFromUrl(url, fallback)
   return /\.[a-z0-9]{2,5}$/i.test(filename) ? filename : fallback
 }

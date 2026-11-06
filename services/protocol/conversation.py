@@ -517,9 +517,9 @@ def build_image_prompt(
     normalized_output_format = normalize_image_output_format(output_format)
     if normalized_output_format:
         option_hints.append(f"生成格式为 {normalized_output_format}。")
-    if frame_count is not MISSING_IMAGE_OPTION:
+    if normalized_output_format == "gif" and frame_count is not MISSING_IMAGE_OPTION:
         option_hints.append(f"frame_count: {_prompt_option_value(frame_count)}")
-    if frame_duration_ms is not MISSING_IMAGE_OPTION:
+    if normalized_output_format == "gif" and frame_duration_ms is not MISSING_IMAGE_OPTION:
         option_hints.append(f"frame_duration_ms: {_prompt_option_value(frame_duration_ms)}")
     suffix = "".join(hints)
     if option_hints:

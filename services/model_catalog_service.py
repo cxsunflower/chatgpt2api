@@ -200,6 +200,7 @@ class ModelCatalogService:
         capabilities = {
             "image_upscale": bool(settings.get("image_upscale_enabled")),
             "high_resolution_image_models": high_resolution_models,
+            "gif_models": [model for model in image_models if model in config.gif_models],
         }
         source = {"chat": chat_source, "image": image_source}
         revision_payload = {
@@ -222,6 +223,7 @@ class ModelCatalogService:
             capabilities=ModelCatalogCapabilities(
                 image_upscale=capabilities["image_upscale"],
                 high_resolution_image_models=tuple(high_resolution_models),
+                gif_models=tuple(capabilities["gif_models"]),
             ),
             source=ModelCatalogSource(**source),
             account_models=tuple(_account_models(accounts)),

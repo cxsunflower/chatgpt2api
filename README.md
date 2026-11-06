@@ -207,6 +207,12 @@ curl http://localhost:3000/v1/chat/completions \
 
 GIF 请求必须收到真正的多帧 GIF 才能成功。上游若返回静态图，接口明确返回 `image_output_format_mismatch`，不会改扩展名冒充动图，也不会因此换账号再次生成。
 
+Studio 的图片参数支持输出格式，以及 GIF 的可选帧数和单帧毫秒数。模型目录的 `capabilities.gif_models` 表示允许发起 GIF 请求，不保证上游一定生成动画；帧参数仅作为生成提示传递。
+
+需要生成动图时，可在 Studio 选择「文件 → 通用文件 / GIF」，选择具体文字模型，在正文说明文件名、画面、帧数与时长，例如「用 Python/Pillow 生成 whale.gif，320×240，12 个不同帧，每帧 150 毫秒，无限循环」。此路径使用 ChatGPT 原生文件工具，已实测生成真实 12 帧 GIF；成功仍取决于账号工具额度和上游生成结果。参考图会作为原始文件上传，成品按原文件名逐项下载。
+
+原生工具限流返回 `native_file:tool_rate_limited`。失败尝试也会更新账号使用时间，供下一次新任务轮换；不会自动重投已经创建的会话。
+
 </details>
 
 <details>

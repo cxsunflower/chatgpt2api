@@ -124,7 +124,7 @@ _Avoid_: A global repository for settings, logs, images, and task state
 - An **Upstream Account** owns one set of **Upstream Credentials**; the Refresh Token renews the Access Token, while account and quota synchronization is a separate operation.
 - **Account Processing Concurrency** limits remote maintenance per active **Upstream Account** and reserves one slot for each complete local atomic account batch; it does not limit Image Task execution slots.
 - An **Image Task** produces zero or more **Image Assets** and exposes one terminal result.
-- An **Editable File Task** publishes one primary **Editable File Asset** and one ZIP **Editable File Asset** when it succeeds; asset reads do not depend on retaining the task record.
+- An **Editable File Task** publishes actual **Editable File Assets**, preserving filenames or packaging multiple outputs as requested; PPT/PSD tasks also publish a ZIP. Asset reads do not depend on retaining the task record.
 - An image call contains one or more **Image Attempts**; an **Account Switch** links consecutive attempts but is not itself a terminal result.
 - A completed public invocation produces one **Call Record**, while an **Active Request** exists only during the live request window.
 - A **Dashboard Metric Projection** advances from the last processed **Call Record** sequence and retains only hourly aggregates; user-facing log deletion and automatic retention preserve that cursor, while explicit repository operations that rotate the **Call Record** generation require a rebuild.
