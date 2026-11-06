@@ -46,6 +46,14 @@ _RemoteCheckMarker = tuple[str, str, str, str, bool | None, str, str]
 _CredentialGeneration = tuple[str, str, str]
 
 
+def _model_sync_error(exc: Exception) -> str:
+    if isinstance(exc, (ImportError, ModuleNotFoundError)):
+        return "models_sync_dependency_unavailable"
+    if "model" in str(exc).lower() and "not found" in str(exc).lower():
+        return "models_sync_model_not_found"
+    return "models_sync_" + type(exc).__name__
+
+
 
 class ImageAccountSelectionError(RuntimeError):
     """图片账号调度失败。
@@ -4925,6 +4933,40 @@ class AccountService:
         if not token:
             return []
 
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            from services.account_processing import account_processing_slot
+            from services.openai_backend_api import OpenAIBackendAPI
+
+            with account_processing_slot():
+                with OpenAIBackendAPI(access_token=token) as backend:
+                    payload = backend.list_models()
+            models = list(dict.fromkeys(
+                str(item.get("id") or "").strip()
+                for item in payload.get("data") or []
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ))
+            self.update_account(
+                token,
+                {
+                    "available_models": models,
+                    "models_synced_at": now,
+                    "models_sync_error": None,
+                },
+                quiet=True,
+            )
+            return models
+        except Exception as exc:
+            self.update_account(
+                token,
+                {
+                    "models_synced_at": now,
+                    "models_sync_error": _model_sync_error(exc),
+                },
+                quiet=True,
+            )
+            return []
+
     def sync_account_models_for_tokens(self, access_tokens: list[str]) -> dict[str, Any]:
         """Bounded parallel model sync for an explicit account selection."""
         tokens = list(dict.fromkeys(
@@ -4955,39 +4997,6 @@ class AccountService:
         tokens = self.list_tokens()
         selected = tokens[:limit] if limit > 0 else tokens
         return self.sync_account_models_for_tokens(selected)
-        now = datetime.now(timezone.utc).isoformat()
-        try:
-            from services.account_processing import account_processing_slot
-            from services.openai_backend_api import OpenAIBackendAPI
-
-            with account_processing_slot():
-                with OpenAIBackendAPI(access_token=token) as backend:
-                    payload = backend.list_models()
-            models = list(dict.fromkeys(
-                str(item.get("id") or "").strip()
-                for item in payload.get("data") or []
-                if isinstance(item, dict) and str(item.get("id") or "").strip()
-            ))
-            self.update_account(
-                token,
-                {
-                    "available_models": models,
-                    "models_synced_at": now,
-                    "models_sync_error": None,
-                },
-                quiet=True,
-            )
-            return models
-        except Exception as exc:
-            self.update_account(
-                token,
-                {
-                    "models_synced_at": now,
-                    "models_sync_error": "models_sync_" + type(exc).__name__,
-                },
-                quiet=True,
-            )
-            return []
 
     def build_export_items(
             self,
