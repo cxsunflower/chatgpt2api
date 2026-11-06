@@ -41,6 +41,9 @@ flowchart LR
   and protocol normalization.
 - Page-private runtimes own drafts, selection, polling, retained snapshots,
   loading/error state, overlay state, and orchestration for one page.
+- Studio's chat composer owns the thinking follow/on/off choice and selected
+  effort. The transport sends `thinking_enabled` and `reasoning_effort`; the
+  page does not infer whether upstream actually performed reasoning.
 - Vue components render final backend semantics and page state. They may format
   pure visual values, but cannot infer backend status, capability, or next
   action from raw error strings or parallel flags.

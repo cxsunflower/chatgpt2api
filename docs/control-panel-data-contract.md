@@ -19,6 +19,7 @@
 | 实时监控 | `GET /api/monitor/realtime`、`services/monitor_view.py`、`api/monitor_contract.py` | `api/monitor.ts` 和监控行 / 详情 |
 | 调用日志 | `GET /api/logs`、`GET /api/logs/{id}`、`services/call_view.py`、`api/call_contract.py` | `api/logs.ts`、列表与详情抽屉 |
 | 账号管理 | `/api/accounts`、`/api/account-groups`、`api/accounts.py` | `api/accounts.ts` 与账号页面运行时 |
+| 模型目录 | `GET /api/model-catalog`、`/api/model-catalog/sync-accounts` | `api/models.ts` 与 Studio 模型选择 |
 | 代理管理 | `/api/proxy/*`、代理管理服务 | `api/proxy.ts` 与代理页面运行时 |
 | 系统设置 | `GET/PATCH /api/settings`、`services/settings_management_service.py`、`contracts/settings.py` | `api/settings.ts` 与设置分区 |
 | 图片管理 | `/api/images`、`ImageStorageService` | `api/gallery.ts` 与图库页面运行时 |
@@ -45,6 +46,8 @@
 图片任务是独立的异步资源。任务存储状态为 `queued`、`running`、`success` 或 `error`；`/api/image-tasks` 再根据结果数量和失败分类投影为 `success`、`partial_success`、`failed` 或 `text_review`。`text_review` 表示上游返回可展示文本，而不是图片生成失败后再由前端推断出的状态。
 
 可编辑文件任务同样是独立的异步资源，但不复用图片任务字段。`/v1/editable-file-tasks` 直接返回 `queued`、`running`、`success` 或 `error`；成功结果包含主文件和 ZIP 下载地址，Studio 只按该投影更新会话状态与下载操作。任务的创建、查询和删除按用户密钥隔离；成功发布后的 `/files/...` 是与图片一致的公开资产地址，只校验存储路径和文件存在性，不反查任务记录。Editable File Task Service 持有固定 20 分钟总时限，一次上游准备、生成、轮询和下载共享同一截止时间；前端轮询不拥有该时限。
+
+模型目录 schema 2 同时提供全局模型、每个账号最近一次成功同步的可用模型、同步时间和脱敏错误分类，以及聊天/图片降级链。账号没有模型快照时仍保持原有调度；已知快照才参与模型能力过滤。Office 文件任务的文本回答不是文件成功；只有真实文件行才生成 `/files/...` 地址，失败任务可由只读 `recover` 入口从原上游会话取回。
 
 ## 页面生命周期
 

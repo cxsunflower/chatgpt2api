@@ -44,6 +44,13 @@ from services.image_failure import (
 from services.image_storage_service import image_media_type, image_storage_service
 from services.image_upscale_service import upscale_image_if_needed
 from services.openai_backend_api import OpenAIBackendAPI
+from services.native_file_support import (
+    MAX_FILES,
+    MAX_TOTAL_BYTES,
+    NativeFileError,
+    clean_generated_text,
+    decode_file_part,
+)
 from services.proxy_service import ImageEgressDeadlineError, proxy_settings
 from services.realtime_monitor_service import realtime_monitor_service
 from utils.helper import (
@@ -451,21 +458,30 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
             content = message.get("content", "")
             text = message_text(content)
             images: list[tuple[bytes, str]] = []
+            files: list[dict[str, Any]] = []
             if role == "user":
                 images.extend(extract_image_from_message_content(content))
                 if isinstance(content, list):
                     for part in content:
-                        if not isinstance(part, dict) or part.get("type") != "image":
+                        if not isinstance(part, dict):
+                            continue
+                        if part.get("type") in {"file", "input_file"}:
+                            files.append(decode_file_part(part))
+                            if len(files) > MAX_FILES or sum(len(item["data"]) for item in files) > MAX_TOTAL_BYTES:
+                                raise NativeFileError("input_quota_exceeded")
+                            continue
+                        if part.get("type") != "image":
                             continue
                         data = part.get("data")
                         if isinstance(data, (bytes, bytearray)) and all(existing[0] != bytes(data) for existing in images):
                             images.append((bytes(data), str(part.get("mime") or "image/png")))
-            if images:
+            if images or files:
                 parts: list[Any] = []
                 if text:
                     parts.append({"type": "text", "text": text})
                 for data, mime in images:
                     parts.append({"type": "image", "data": data, "mime": mime})
+                parts.extend(files)
                 normalized.append({"role": role, "content": parts})
             else:
                 normalized.append({"role": role, "content": text})
@@ -1215,14 +1231,79 @@ def _remember_text_account(backend: OpenAIBackendAPI, access_token: str) -> str:
     return email
 
 
-def text_backend() -> OpenAIBackendAPI:
-    access_token = account_service.get_text_access_token()
+def text_backend(model: str | None = None) -> OpenAIBackendAPI:
+    access_token = account_service.get_text_access_token(model=model)
     backend = OpenAIBackendAPI(access_token=access_token)
     _remember_text_account(backend, access_token)
     return backend
 
 
+FILE_ANALYSIS_RECOVERY_SECS = 300.0
+FILE_ANALYSIS_RECOVERY_INTERVAL_SECS = 3.0
+
+
+def native_file_final_text(conversation: dict[str, Any]) -> str:
+    candidates: list[tuple[float, str]] = []
+    for node in (conversation.get("mapping") or {}).values():
+        message = (node or {}).get("message") or {}
+        if (message.get("author") or {}).get("role") != "assistant":
+            continue
+        if message.get("recipient") not in (None, "", "all"):
+            continue
+        if not message.get("end_turn") or message.get("channel") not in (None, "", "final"):
+            continue
+        if (message.get("content") or {}).get("content_type") not in {None, "", "text"}:
+            continue
+        text = assistant_message_text(message)
+        if text:
+            candidates.append((float(message.get("create_time") or 0), text))
+    if not candidates:
+        raise NativeFileError("analysis_no_final_response")
+    return clean_generated_text(max(candidates, key=lambda item: item[0])[1])
+
+
+def _recover_native_file_final_text(
+        backend: OpenAIBackendAPI,
+        conversation_id: str,
+        *,
+        timeout_secs: float = FILE_ANALYSIS_RECOVERY_SECS,
+        interval_secs: float = FILE_ANALYSIS_RECOVERY_INTERVAL_SECS,
+) -> str:
+    deadline = time.monotonic() + max(0.001, float(timeout_secs))
+    last_error: Exception | None = None
+    while True:
+        try:
+            detail = backend._get_editable_conversation_detail(
+                conversation_id,
+                deadline=deadline,
+            )
+        except Exception as exc:
+            if not OpenAIBackendAPI._native_stream_recoverable(exc):
+                raise
+            last_error = exc
+        else:
+            failure = classify_conversation_failure(detail)
+            if failure is not None and failure.code != "upstream_text_reply":
+                raise ImageFailureError(failure=failure)
+            try:
+                return native_file_final_text(detail)
+            except NativeFileError as exc:
+                last_error = exc
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise last_error or NativeFileError("analysis_recovery_timeout")
+        time.sleep(min(max(0.1, float(interval_secs)), remaining))
+
+
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
+    file_mode = any(
+        isinstance(message.get("content"), list)
+        and any(
+            isinstance(part, dict) and part.get("type") in {"file", "input_file"}
+            for part in message["content"]
+        )
+        for message in (request.messages or [])
+    )
     attempted_tokens: set[str] = set()
     token = getattr(backend, "access_token", "")
     emitted = False
@@ -1238,22 +1319,58 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             _remember_text_account(backend, token)
             active_backend = OpenAIBackendAPI(access_token=token)
             _remember_text_account(active_backend, token)
-            for event in conversation_events(
-                active_backend,
-                messages=request.messages,
-                model=request.model,
-                prompt=request.prompt,
-                thinking_effort=request.thinking_effort,
-            ):
-                structured_failure = event.get("_image_failure")
-                if isinstance(structured_failure, ImageFailure):
-                    raise ImageFailureError(failure=structured_failure)
-                if event.get("type") != "conversation.delta":
-                    continue
-                delta = str(event.get("delta") or "")
-                if delta:
-                    emitted = True
-                    yield delta
+            file_conversation_id = ""
+            stream_interrupted = False
+            try:
+                for event in conversation_events(
+                    active_backend,
+                    messages=request.messages,
+                    model=request.model,
+                    prompt=request.prompt,
+                    thinking_effort=request.thinking_effort,
+                ):
+                    file_conversation_id = str(
+                        event.get("conversation_id") or file_conversation_id
+                    )
+                    if file_mode and file_conversation_id:
+                        emitted = True
+                    structured_failure = event.get("_image_failure")
+                    if isinstance(structured_failure, ImageFailure):
+                        raise ImageFailureError(failure=structured_failure)
+                    if event.get("type") != "conversation.delta":
+                        continue
+                    delta = str(event.get("delta") or "")
+                    if file_mode:
+                        continue
+                    if delta:
+                        emitted = True
+                        yield delta
+            except (curl_exceptions.RequestException, TimeoutError) as stream_error:
+                if not (
+                    file_mode
+                    and file_conversation_id
+                    and OpenAIBackendAPI._native_stream_recoverable(stream_error)
+                ):
+                    raise
+                stream_interrupted = True
+                logger.warning({
+                    "event": "native_file_analysis_stream_interrupted",
+                    "conversation_id": file_conversation_id,
+                    "error_type": type(stream_error).__name__,
+                    "curl_code": getattr(stream_error, "code", None),
+                })
+            if file_mode:
+                if not file_conversation_id:
+                    raise NativeFileError("analysis_conversation_id_missing")
+                final = (
+                    _recover_native_file_final_text(active_backend, file_conversation_id)
+                    if stream_interrupted
+                    else native_file_final_text(
+                        active_backend._get_editable_conversation_detail(file_conversation_id)
+                    )
+                )
+                emitted = True
+                yield final
             account_service.mark_text_used(token)
             return
         except Exception as exc:
@@ -1279,7 +1396,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                     })
                 auth_failures += 1
             if auth_failure and not emitted and auth_failures < 2:
-                token = account_service.get_text_access_token(attempted_tokens)
+                token = account_service.get_text_access_token(attempted_tokens, model=request.model)
                 if token:
                     continue
             if token and not getattr(exc, "account_email", ""):
@@ -2245,6 +2362,7 @@ def _generate_single_image(
                     plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
                     excluded_tokens=attempted_tokens,
                     deadline_monotonic=request.deadline_monotonic or None,
+                    model=request.model,
                 )
                 attempted_tokens.add(token)
                 account_attempt_started = account_wait_started

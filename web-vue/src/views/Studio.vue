@@ -102,6 +102,7 @@
             v-model:text="composerText"
             v-model:chat-model="chatModel"
             v-model:chat-reasoning-effort="chatReasoningEffort"
+            v-model:chat-thinking-enabled="chatThinkingEnabled"
             v-model:file-kind="fileKind"
             :image-form="imageForm"
             :chat-model-options="chatModelOptions"
@@ -318,6 +319,7 @@ const toggleFullscreen = layoutRuntime.toggleFullscreen
 
 const chatModel = modelFormRuntime.chatModel
 const chatReasoningEffort = modelFormRuntime.chatReasoningEffort
+const chatThinkingEnabled = modelFormRuntime.chatThinkingEnabled
 const imageForm = modelFormRuntime.imageForm
 const imageHighResolutionEnabled = modelFormRuntime.imageHighResolutionEnabled
 
@@ -497,6 +499,7 @@ const sendRuntime = useStudioSendRuntime({
   fileTaskRuntime,
   chatModel,
   chatReasoningEffort,
+  chatThinkingEnabled,
   imageForm,
   toast,
   hooks: {

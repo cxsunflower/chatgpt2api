@@ -13,6 +13,7 @@ export type StudioChatStreamInput = {
   assistantMessage: StudioMessage
   model: string
   reasoningEffort: string
+  thinkingEnabled?: boolean
 }
 
 export function useStudioChatStreamRuntime(hooks: StudioChatStreamRuntimeHooks) {
@@ -54,6 +55,7 @@ export function useStudioChatStreamRuntime(hooks: StudioChatStreamRuntimeHooks) 
         currentAssistantId: input.assistantMessage.id,
         model: input.model,
         reasoningEffort: input.reasoningEffort,
+        thinkingEnabled: input.thinkingEnabled,
         signal: controller.signal,
         handlers: {
           onDelta: scheduleDeltaFlush,

@@ -27,6 +27,9 @@ CACHEABLE_TEXT_KEYS = {
     "tools",
     "top_p",
     "thinking_effort",
+    "thinking",
+    "thinking_enabled",
+    "reasoning_enabled",
     "user",
 }
 INTERNAL_RESPONSE_KEYS = {

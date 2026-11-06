@@ -19,13 +19,15 @@ function validateCatalog(payload: ModelCatalogResponse | null | undefined): Mode
   if (
     !payload
     || payload.object !== 'model_catalog'
-    || payload.schema_version !== 1
+    || payload.schema_version !== 2
     || !Array.isArray(payload.chat_models)
     || !Array.isArray(payload.image_models)
     || !Array.isArray(payload.all_models)
     || !payload.defaults
     || !payload.capabilities
     || !payload.source
+    || !Array.isArray(payload.account_models)
+    || !payload.fallback_chains
   ) {
     throw new Error('Invalid model catalog response')
   }

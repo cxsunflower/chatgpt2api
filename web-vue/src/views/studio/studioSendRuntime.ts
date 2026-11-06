@@ -37,6 +37,7 @@ export type StudioSendRuntimeInput = {
   fileTaskRuntime: Pick<ReturnType<typeof useStudioFileTaskRuntime>, 'merge' | 'schedulePoll'>
   chatModel: Ref<string>
   chatReasoningEffort: Ref<string>
+  chatThinkingEnabled: Ref<boolean | null>
   imageForm: StudioImageForm
   toast: Pick<ReturnType<typeof useToast>, 'success' | 'error'>
   hooks: StudioSendRuntimeHooks
@@ -321,6 +322,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       assistantMessage,
       model: chatModel.value,
       reasoningEffort: chatReasoningEffort.value,
+      thinkingEnabled: input.chatThinkingEnabled.value ?? undefined,
     })
   }
 

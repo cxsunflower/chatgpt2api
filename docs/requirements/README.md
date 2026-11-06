@@ -31,6 +31,9 @@ requirements may move to `archive/` after links and this index are updated.
 
 - [`0001-image-gif-output.md`](0001-image-gif-output.md) — GIF output and
   gpt-image-2.6 compatibility (`implementing`).
+- [`0003-account-model-fallback-and-thinking.md`](0003-account-model-fallback-and-thinking.md)
+  — account model capability, fallback chains, and chat thinking controls
+  (`pending-verification`).
 
 PRDs are planning evidence, never proof that the product already behaves as
 described.

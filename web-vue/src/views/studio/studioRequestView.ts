@@ -71,6 +71,7 @@ export async function streamStudioChatReply(input: {
   currentAssistantId: string
   model: string
   reasoningEffort: string
+  thinkingEnabled?: boolean
   signal: AbortSignal
   handlers: StudioChatReplyHandlers
 }) {
@@ -78,6 +79,7 @@ export async function streamStudioChatReply(input: {
     model: input.model,
     messages: buildStudioChatMessages(input.conversation, input.currentAssistantId),
     reasoningEffort: input.reasoningEffort,
+    thinkingEnabled: input.thinkingEnabled,
     signal: input.signal,
     onDelta: input.handlers.onDelta,
   })

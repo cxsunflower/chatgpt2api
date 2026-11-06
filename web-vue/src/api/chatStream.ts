@@ -5,6 +5,7 @@ export interface ChatStreamInput {
   model: string
   messages: OpenAIV1ChatMessage[]
   reasoningEffort?: string
+  thinkingEnabled?: boolean
   signal?: AbortSignal
   onDelta?: (delta: string) => void
 }
@@ -117,6 +118,7 @@ export async function streamChatCompletion(input: ChatStreamInput): Promise<Chat
       model: input.model.trim() || 'auto',
       messages: input.messages,
       stream: true,
+      ...(typeof input.thinkingEnabled === 'boolean' ? { thinking_enabled: input.thinkingEnabled } : {}),
       ...(input.reasoningEffort ? { reasoning_effort: input.reasoningEffort } : {}),
     }),
     signal: input.signal,

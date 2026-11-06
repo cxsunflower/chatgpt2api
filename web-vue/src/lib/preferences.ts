@@ -12,6 +12,7 @@ export const preferenceKeys = {
   studioActiveMode: 'studio-active-mode',
   studioActiveConversationId: 'studio-active-conversation-id',
   studioChatModel: 'studio-chat-model',
+  studioChatThinkingFollow: 'studio-chat-thinking-follow',
   studioChatReasoningEffort: 'studio-chat-reasoning-effort',
   studioConversationBadges: 'studio-conversation-badges',
   studioConversations: 'studio-conversations',

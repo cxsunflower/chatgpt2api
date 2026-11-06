@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from sqlalchemy import Boolean, Column, Float, JSON, String, Text, text
+from sqlalchemy import Boolean, Column, Float, JSON, String, Text, inspect, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -24,6 +24,8 @@ class EditableFileTaskModel(DatabaseBase):
     status = Column(String(24), nullable=False, index=True)
     kind = Column(String(8), nullable=False)
     model = Column(String(128), nullable=True)
+    request_fingerprint = Column(String(64), nullable=True)
+    output_filename = Column(String(240), nullable=True)
     created_at = Column(String(64), nullable=False)
     updated_at = Column(String(64), nullable=False, index=True)
     created_ts = Column(Float, nullable=False)
@@ -40,6 +42,13 @@ class EditableFileTaskRepository:
     def __init__(self, database_url: str | None = None) -> None:
         self.database_url = database_url or resolve_database_url()
         self.engine = initialize_application_database(self.database_url)
+        with self.engine.begin() as connection:
+            existing = {column["name"] for column in inspect(connection).get_columns("editable_file_task")}
+            for name, size in (("request_fingerprint", 64), ("output_filename", 240)):
+                if name not in existing:
+                    connection.execute(
+                        text(f"ALTER TABLE editable_file_task ADD COLUMN {name} VARCHAR({size})")
+                    )
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
 
     @staticmethod
@@ -59,7 +68,15 @@ class EditableFileTaskRepository:
             "created_ts": float(row.created_ts or 0),
             "updated_ts": float(row.updated_ts or 0),
         }
-        for name in ("model", "started_ts", "ended_ts", "error", "account_email"):
+        for name in (
+            "model",
+            "request_fingerprint",
+            "output_filename",
+            "started_ts",
+            "ended_ts",
+            "error",
+            "account_email",
+        ):
             value = getattr(row, name)
             if value not in (None, ""):
                 task[name] = value
@@ -85,6 +102,8 @@ class EditableFileTaskRepository:
             status=cls._required_text(task, "status"),
             kind=cls._required_text(task, "kind"),
             model=str(task.get("model") or "").strip() or None,
+            request_fingerprint=str(task.get("request_fingerprint") or "") or None,
+            output_filename=str(task.get("output_filename") or "") or None,
             created_at=cls._required_text(task, "created_at"),
             updated_at=cls._required_text(task, "updated_at"),
             created_ts=float(task.get("created_ts") or 0),
@@ -182,6 +201,9 @@ class EditableFileTaskRepository:
     def update(self, owner_id: str, task_id: str, **updates: Any) -> dict[str, Any] | None:
         allowed = {
             "status",
+            "model",
+            "request_fingerprint",
+            "output_filename",
             "updated_at",
             "updated_ts",
             "started_ts",
@@ -216,7 +238,7 @@ class EditableFileTaskRepository:
                     value = float(value) if value is not None else None
                 elif name == "delete_pending":
                     value = bool(value)
-                elif name in {"error", "account_email"}:
+                elif name in {"error", "account_email", "model", "request_fingerprint", "output_filename"}:
                     value = str(value or "") or None
                 setattr(row, name, value)
             session.commit()

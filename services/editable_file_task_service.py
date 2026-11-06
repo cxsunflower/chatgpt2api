@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import mimetypes
+import os
 import re
 import shutil
+import tempfile
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -16,7 +22,18 @@ from services.account_service import (
 )
 from services.config import DATA_DIR
 from services.content_filter import request_text
+from services.editable_file_failure import EditableFileFailureError
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.native_file_support import (
+    MAX_FILES,
+    MAX_TOTAL_BYTES,
+    NativeFileError,
+    clean_generated_text,
+    decode_file_part,
+    file_name,
+    repair_generated_code,
+    validate_download,
+)
 from services.openai_backend_api import EDITABLE_FILE_MODEL, OpenAIBackendAPI
 from services.storage.editable_file_task_repository import EditableFileTaskRepository
 from utils.file_names import is_safe_public_filename
@@ -60,6 +77,7 @@ EDITABLE_FILE_STORAGE_PREFIX = "asset-"
 EDITABLE_FILE_EXTENSIONS = {
     "ppt": {".ppt", ".pptx", ".zip"},
     "psd": {".psd", ".zip"},
+    "file": set(),
 }
 
 
@@ -153,6 +171,7 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     delete_pending = bool(task.get("delete_pending"))
     can_download = not delete_pending and status == TASK_STATUS_SUCCESS and bool(
         _clean(result.get("primary_url")) or _clean(result.get("zip_url"))
+        or any(isinstance(item, dict) and _clean(item.get("url")) for item in result.get("files") or [])
     )
     item = {
         "id": task.get("id"),
@@ -162,6 +181,7 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "status_icon": presentation["icon"],
         "is_active": status in UNFINISHED_STATUSES,
         "kind": task.get("kind"),
+        "model": task.get("model"),
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
         "elapsed_seconds": _elapsed_seconds(task),
@@ -186,6 +206,10 @@ class EditableFileTaskInvalidIdError(ValueError):
     pass
 
 
+class EditableFileTaskConflictError(ValueError):
+    pass
+
+
 class EditableFileTaskCleanupError(RuntimeError):
     pass
 
@@ -205,11 +229,53 @@ class EditableFileTaskService:
             self._recover_pending_deletions_locked()
             self._recover_unfinished_locked()
 
-    def submit_ppt(self, identity: dict[str, object], *, client_task_id: str = "", prompt: str = "", base64_images: list[str] | None = None, base_url: str = "") -> dict[str, Any]:
-        return self._submit(identity, client_task_id=client_task_id, kind="ppt", prompt=prompt, base64_images=base64_images or [], base_url=base_url)
+    def submit_ppt(self, identity: dict[str, object], *, client_task_id: str = "", prompt: str = "", base64_images: list[str] | None = None, base_url: str = "", model: str = EDITABLE_FILE_MODEL) -> dict[str, Any]:
+        return self._submit(identity, client_task_id=client_task_id, kind="ppt", prompt=prompt, base64_images=base64_images or [], base_url=base_url, model=model)
 
-    def submit_psd(self, identity: dict[str, object], *, client_task_id: str = "", prompt: str = "", base64_images: list[str] | None = None, base_url: str = "") -> dict[str, Any]:
-        return self._submit(identity, client_task_id=client_task_id, kind="psd", prompt=prompt, base64_images=base64_images or [], base_url=base_url)
+    def submit_psd(self, identity: dict[str, object], *, client_task_id: str = "", prompt: str = "", base64_images: list[str] | None = None, base_url: str = "", model: str = EDITABLE_FILE_MODEL) -> dict[str, Any]:
+        return self._submit(identity, client_task_id=client_task_id, kind="psd", prompt=prompt, base64_images=base64_images or [], base_url=base_url, model=model)
+
+    def submit_file(
+        self,
+        identity: dict[str, object],
+        *,
+        client_task_id: str = "",
+        prompt: str = "",
+        model: str = EDITABLE_FILE_MODEL,
+        output_filename: str = "result.txt",
+        base_url: str = "",
+        input_files: list | None = None,
+        transport: str = "editable",
+        thinking_effort: str = "",
+        output_bundle: str = "zip",
+    ) -> dict[str, Any]:
+        if transport not in {"editable", "chat"}:
+            raise EditableFileTaskInvalidIdError("invalid generation transport")
+        if output_bundle not in {"separate", "zip"}:
+            raise EditableFileTaskInvalidIdError("invalid output bundle mode")
+        if model == "auto" or not model.strip() or not prompt.strip():
+            raise EditableFileTaskInvalidIdError("nonempty prompt and explicit model are required")
+        try:
+            output_filename = file_name(output_filename)
+            originals = [decode_file_part(item) for item in (input_files or [])]
+        except NativeFileError as exc:
+            raise EditableFileTaskInvalidIdError(str(exc)) from exc
+        if len(originals) > MAX_FILES or sum(len(item["data"]) for item in originals) > MAX_TOTAL_BYTES:
+            raise EditableFileTaskInvalidIdError("native_file:input_quota_exceeded")
+        return self._submit(
+            identity,
+            client_task_id=client_task_id,
+            kind="file",
+            prompt=prompt,
+            base64_images=[],
+            base_url=base_url,
+            model=model,
+            output_filename=output_filename,
+            input_files=input_files or [],
+            transport=transport,
+            thinking_effort=thinking_effort,
+            output_bundle=output_bundle,
+        )
 
     def list_tasks(
             self,
@@ -259,11 +325,41 @@ class EditableFileTaskService:
             self._repository.delete(owner, normalized_task_id)
         return {"task_id": normalized_task_id, "deleted": True}
 
-    def _submit(self, identity: dict[str, object], *, client_task_id: str, kind: str, prompt: str, base64_images: list[str], base_url: str) -> dict[str, Any]:
+    def _submit(
+        self,
+        identity: dict[str, object],
+        *,
+        client_task_id: str,
+        kind: str,
+        prompt: str,
+        base64_images: list[str],
+        base_url: str,
+        model: str = EDITABLE_FILE_MODEL,
+        output_filename: str = "",
+        input_files: list | None = None,
+        transport: str = "editable",
+        thinking_effort: str = "",
+        output_bundle: str = "zip",
+    ) -> dict[str, Any]:
         task_id = _resolve_task_id(client_task_id)
         owner = _owner_id(identity)
         key = _task_key(owner, task_id)
         now = _now_iso()
+        fingerprint_data = {
+            "kind": kind,
+            "prompt": prompt,
+            "images": base64_images,
+            "model": model,
+            "output_filename": output_filename,
+            "input_files": input_files or [],
+            "thinking_effort": thinking_effort,
+            "output_bundle": output_bundle,
+        }
+        if transport == "chat":
+            fingerprint_data["transport"] = "chat"
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_data, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
         with self._lock:
             ts = time.time()
             task, created = self._repository.create({
@@ -272,24 +368,53 @@ class EditableFileTaskService:
                 "owner_id": owner,
                 "status": TASK_STATUS_QUEUED,
                 "kind": kind,
-                "model": EDITABLE_FILE_MODEL,
+                "model": model,
+                "request_fingerprint": fingerprint,
+                "output_filename": output_filename,
                 "created_at": now,
                 "updated_at": now,
                 "created_ts": ts,
                 "updated_ts": ts,
             })
             if not created:
+                if task.get("request_fingerprint") != fingerprint:
+                    raise EditableFileTaskConflictError(
+                        "client_task_id already belongs to a different input"
+                    )
                 return _public_task(task)
-        threading.Thread(target=self._run_task, args=(key, kind, prompt, base64_images, dict(identity), base_url), name=f"{kind}-file-task-{task_id[:16]}", daemon=True).start()
+        threading.Thread(
+            target=self._run_task,
+            args=(key, kind, prompt, base64_images, dict(identity), base_url, input_files or []),
+            kwargs={
+                "transport": transport,
+                "thinking_effort": thinking_effort,
+                "output_bundle": output_bundle,
+            },
+            name=f"{kind}-file-task-{task_id[:16]}",
+            daemon=True,
+        ).start()
         return _public_task(task)
 
-    def _run_task(self, key: str, kind: str, prompt: str, base64_images: list[str], identity: dict[str, object], base_url: str) -> None:
+    def _run_task(
+        self,
+        key: str,
+        kind: str,
+        prompt: str,
+        base64_images: list[str],
+        identity: dict[str, object],
+        base_url: str,
+        input_files: list | None = None,
+        transport: str = "editable",
+        thinking_effort: str = "",
+        output_bundle: str = "zip",
+    ) -> None:
         started = time.time()
         token = ""
         account_email = ""
         staging_dir: Path | None = None
         published_dir: Path | None = None
         success_recorded = False
+        stored_task: dict[str, Any] = {}
         self._update_task(key, status=TASK_STATUS_RUNNING, error="", started_ts=started)
         try:
             if kind == "psd" and not base64_images:
@@ -306,34 +431,102 @@ class EditableFileTaskService:
             if staging_dir.exists():
                 shutil.rmtree(staging_dir)
             with OpenAIBackendAPI(token) as backend:
-                export = backend.export_psd_zip if kind == "psd" else backend.export_ppt_zip
-                result = export(
-                    base64_images,
-                    prompt,
-                    staging_dir,
-                    timeout_secs=EDITABLE_FILE_TIMEOUT_SECS,
-                )
+                if kind == "file":
+                    result = backend.export_file(
+                        prompt,
+                        staging_dir,
+                        model=stored_task["model"],
+                        output_filename=stored_task.get("output_filename") or "result.txt",
+                        input_files=input_files or [],
+                        timeout_secs=EDITABLE_FILE_TIMEOUT_SECS,
+                        transport=transport,
+                        thinking_effort=thinking_effort,
+                    )
+                else:
+                    export = backend.export_psd_zip if kind == "psd" else backend.export_ppt_zip
+                    result = export(
+                        base64_images,
+                        prompt,
+                        staging_dir,
+                        timeout_secs=EDITABLE_FILE_TIMEOUT_SECS,
+                    )
             account_service.mark_text_used(token)
-            primary_path, zip_path = self._publish_files(
-                stored_task,
-                result.primary_path,
-                result.zip_path,
-            )
-            published_dir = primary_path.parent
-            data = {"conversation_id": result.conversation_id, "primary_url": _file_url(primary_path, base_url), "zip_url": _file_url(zip_path, base_url)}
+            if kind == "file":
+                if not getattr(result, "files", []):
+                    text = clean_generated_text(getattr(result, "text", ""))
+                    if transport == "chat" or not text:
+                        raise NativeFileError("generation_no_actual_file")
+                    data = {
+                        "conversation_id": getattr(result, "conversation_id", ""),
+                        "primary_url": "",
+                        "files": [],
+                        "original_files": [],
+                        "text": text,
+                        "delivery_format": "text_only",
+                    }
+                    published_dir = None
+                else:
+                    data = self._publish_native_output(
+                        stored_task,
+                        result,
+                        base_url=base_url,
+                        output_bundle=output_bundle,
+                    )
+                    published_dir = self._output_dir(stored_task)
+            else:
+                primary_path, zip_path = self._publish_files(
+                    stored_task,
+                    result.primary_path,
+                    result.zip_path,
+                )
+                published_dir = primary_path.parent
+                data = {
+                    "conversation_id": result.conversation_id,
+                    "primary_url": _file_url(primary_path, base_url),
+                    "zip_url": _file_url(zip_path, base_url),
+                }
             self._update_task(key, status=TASK_STATUS_SUCCESS, result=data, account_email=account_email, error="", ended_ts=time.time())
             success_recorded = True
-            self._log_call(identity, kind, started, request_text(prompt), account_email=account_email, result=data)
+            self._log_call(
+                identity,
+                kind,
+                started,
+                request_text(prompt),
+                account_email=account_email,
+                result=data,
+                model=stored_task.get("model", EDITABLE_FILE_MODEL),
+                endpoint="/v1/chat/completions" if transport == "chat" else "",
+            )
         except Exception as exc:
             cleanup_paths = [staging_dir]
             if not success_recorded:
                 cleanup_paths.append(published_dir)
             cleanup_succeeded = self._remove_directories(cleanup_paths)
-            error = str(exc) or "editable file task failed"
+            if kind == "file":
+                if isinstance(exc, NativeFileError):
+                    error = str(exc)
+                elif isinstance(exc, EditableFileFailureError):
+                    error = "native_file:generation_" + exc.failure.code
+                else:
+                    error = "native_file:task_" + type(exc).__name__
+            else:
+                error = str(exc) or "editable file task failed"
             if not cleanup_succeeded:
                 error = f"{error}; generated files could not be removed"
-            self._update_task(key, status=TASK_STATUS_ERROR, error=error, account_email=account_email, ended_ts=time.time())
-            self._log_call(identity, kind, started, request_text(prompt), status="failed", error=error, account_email=account_email)
+            conversation_id = str(getattr(exc, "conversation_id", "") or "")
+            recovery = {"conversation_id": conversation_id, "download_pending": True} if kind == "file" and conversation_id else {}
+            self._update_task(key, status=TASK_STATUS_ERROR, error=error, account_email=account_email, ended_ts=time.time(), **({"result": recovery} if recovery else {}))
+            self._log_call(
+                identity,
+                kind,
+                started,
+                request_text(prompt),
+                status="failed",
+                error=error,
+                account_email=account_email,
+                model=stored_task.get("model", EDITABLE_FILE_MODEL),
+                endpoint="/v1/chat/completions" if transport == "chat" else "",
+            )
 
     def public_file_path(self, relative_path: str) -> Path:
         value = str(relative_path or "")
@@ -352,7 +545,7 @@ class EditableFileTaskService:
             allowed_extensions is None
             or not _is_storage_id(storage_id)
             or not is_safe_public_filename(filename)
-            or Path(filename).suffix.lower() not in allowed_extensions
+            or (kind != "file" and Path(filename).suffix.lower() not in allowed_extensions)
         ):
             raise FileNotFoundError(raw)
 
@@ -364,6 +557,165 @@ class EditableFileTaskService:
         except (OSError, RuntimeError, ValueError) as exc:
             raise FileNotFoundError(raw) from exc
         return path
+
+    def _publish_native_output(
+        self,
+        task: dict[str, Any],
+        result: Any,
+        *,
+        base_url: str,
+        output_bundle: str,
+    ) -> dict[str, Any]:
+        files = [Path(item) for item in (getattr(result, "files", []) or [])]
+        text = clean_generated_text(getattr(result, "text", ""))
+        if not files:
+            if not text:
+                raise NativeFileError("generation_no_actual_output")
+            return {
+                "conversation_id": getattr(result, "conversation_id", ""),
+                "primary_url": "",
+                "files": [],
+                "original_files": [],
+                "text": text,
+                "delivery_format": "text_only",
+            }
+        staging = self._staging_dir(task)
+        output = self._output_dir(task)
+        if output.exists():
+            raise NativeFileError("publish_output_exists")
+        originals: list[dict[str, Any]] = []
+        total = 0
+        seen_names: set[str] = set()
+        checked: list[Path] = []
+        for path in files:
+            resolved = path.resolve()
+            if resolved.is_symlink() or resolved.parent != staging or not resolved.is_file():
+                raise NativeFileError("publish_file_outside_staging")
+            name = file_name(resolved.name)
+            if name.casefold() in seen_names:
+                raise NativeFileError("publish_duplicate_names")
+            seen_names.add(name.casefold())
+            data = resolved.read_bytes()
+            total += len(data)
+            if total > MAX_TOTAL_BYTES:
+                raise NativeFileError("output_total_size_limit")
+            originals.append({
+                "name": name,
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            })
+            checked.append(resolved)
+        if {item.name for item in checked} != {item.name for item in staging.iterdir() if item.is_file()}:
+            raise NativeFileError("publish_unexpected_files")
+        if output_bundle == "zip" and len(checked) > 1:
+            descriptor, temp_name = tempfile.mkstemp(prefix=".bundle-", suffix=".tmp", dir=staging)
+            os.close(descriptor)
+            bundle = Path(temp_name)
+            try:
+                with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+                    for path in checked:
+                        info = zipfile.ZipInfo(path.name, date_time=(1980, 1, 1, 0, 0, 0))
+                        info.compress_type = zipfile.ZIP_DEFLATED
+                        info.external_attr = 0o100600 << 16
+                        archive.writestr(info, path.read_bytes())
+                if bundle.stat().st_size > MAX_FILE_BYTES:
+                    raise NativeFileError("bundle_oversize")
+                with zipfile.ZipFile(bundle) as archive:
+                    if archive.testzip() is not None:
+                        raise NativeFileError("bundle_integrity_failed")
+                for path in checked:
+                    path.unlink()
+                bundle.replace(staging / "files.zip")
+                (staging / "files.zip").chmod(0o600)
+            finally:
+                bundle.unlink(missing_ok=True)
+        output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staging.replace(output)
+        published = sorted(output.iterdir(), key=lambda item: item.name)
+        delivery_format = "zip" if len(published) == 1 and published[0].suffix.lower() == ".zip" else (
+            "separate" if len(published) > 1 else "original"
+        )
+        return {
+            "conversation_id": getattr(result, "conversation_id", ""),
+            "primary_url": _file_url(published[0], base_url),
+            "files": [
+                {
+                    "name": item.name,
+                    "mime": mimetypes.guess_type(item.name)[0] or "application/octet-stream",
+                    "size": item.stat().st_size,
+                    "url": _file_url(item, base_url),
+                }
+                for item in published
+            ],
+            "original_files": originals,
+            "text": text,
+            "delivery_format": delivery_format,
+        }
+
+    def recover_native_output(
+        self,
+        identity: dict[str, object],
+        task_id: str,
+        *,
+        base_url: str = "",
+        output_bundle: str = "zip",
+    ) -> dict[str, Any] | None:
+        """GET-only recovery for a previously failed native file publication."""
+        owner = _owner_id(identity)
+        normalized_task_id = _clean(task_id)
+        with self._lock:
+            task = self._repository.get(owner, normalized_task_id)
+        if task is None or task.get("kind") != "file":
+            return None
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        conversation_id = _clean(result.get("conversation_id"))
+        if not conversation_id or task.get("status") == TASK_STATUS_SUCCESS:
+            return None
+        model = _clean(task.get("model")) or EDITABLE_FILE_MODEL
+        output_filename = _clean(task.get("output_filename")) or "result.txt"
+        staging_dir = self._staging_dir(task)
+        started_at = time.time()
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        try:
+            token = _editable_access_token()
+            with OpenAIBackendAPI(token) as backend:
+                exported = backend.recover_file(
+                    conversation_id,
+                    staging_dir,
+                    output_filename=output_filename,
+                    timeout_secs=EDITABLE_FILE_TIMEOUT_SECS,
+                )
+            data = self._publish_native_output(
+                task,
+                exported,
+                base_url=base_url,
+                output_bundle=output_bundle,
+            )
+            self._update_task(
+                normalized_task_id,
+                status=TASK_STATUS_SUCCESS,
+                result=data,
+                error="",
+                ended_ts=time.time(),
+                updated_at=_now_iso(),
+                updated_ts=time.time(),
+            )
+            self._log_call(
+                identity,
+                "file",
+                started_at,
+                "",
+                result=data,
+                model=model,
+                endpoint="/v1/chat/completions",
+            )
+            return _public_task(
+                self._repository.get(owner, normalized_task_id) or task
+            )
+        except Exception:
+            self._remove_directories([staging_dir])
+            raise
 
     def _publish_files(
             self,
@@ -399,7 +751,7 @@ class EditableFileTaskService:
     def _output_dir(task: dict[str, Any]) -> Path:
         root = EDITABLE_FILE_ROOT.resolve()
         kind = _clean(task.get("kind"))
-        if kind not in {"ppt", "psd"}:
+        if kind not in {"ppt", "psd", "file"}:
             raise ValueError("editable file task kind is invalid")
         storage_id = _storage_id(task)
         kind_root = (root / kind).resolve()
@@ -497,13 +849,15 @@ class EditableFileTaskService:
             error: str = "",
             account_email: str = "",
             result: dict[str, str] | None = None,
+            model: str = EDITABLE_FILE_MODEL,
+            endpoint: str = "",
     ) -> None:
         detail = {
             "key_id": identity.get("id"),
             "key_name": identity.get("name"),
             "role": identity.get("role"),
-            "endpoint": f"/v1/{kind}/generations",
-            "model": EDITABLE_FILE_MODEL,
+            "endpoint": endpoint or f"/v1/{kind}/generations",
+            "model": model,
             "started_at": beijing_from_timestamp(started),
             "ended_at": _now_iso(),
             "duration_ms": int((time.time() - started) * 1000),

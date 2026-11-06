@@ -10,6 +10,7 @@ from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import (
     EditableFileTaskCleanupError,
+    EditableFileTaskConflictError,
     EditableFileTaskInvalidIdError,
     EditableFileTaskNotFoundError,
     EditableFileTaskNotTerminalError,
@@ -76,6 +77,11 @@ class SearchRequest(BaseModel):
 class EditableFileTaskRequest(BaseModel):
     prompt: str = ""
     kind: str = "ppt"
+    model: str = "gpt-6"
+    output_filename: str = "result.txt"
+    output_bundle: str = "zip"
+    thinking_effort: str = ""
+    input_files: list[dict[str, object]] = Field(default_factory=list, max_length=6)
     base64_images: list[str] = Field(default_factory=list)
     client_task_id: str | None = None
 
@@ -119,6 +125,8 @@ def create_router() -> APIRouter:
     async def submit_editable_file_task(submit, identity, **kwargs):
         try:
             return await run_in_threadpool(submit, identity, **kwargs)
+        except EditableFileTaskConflictError as exc:
+            raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
         except EditableFileTaskInvalidIdError as exc:
             raise HTTPException(
                 status_code=400,
@@ -178,6 +186,64 @@ def create_router() -> APIRouter:
             if key not in body.model_fields_set:
                 payload.pop(key, None)
         payload["base_url"] = resolve_image_base_url(request)
+        if payload.get("output_type") == "file":
+            if payload.get("stream") or is_image_chat_request(payload) or payload.get("tools"):
+                raise HTTPException(status_code=400, detail={"error": "file output requires non-stream text model without client tools"})
+            messages = payload.get("messages")
+            if (
+                not isinstance(messages, list)
+                or len(messages) != 1
+                or not isinstance(messages[0], dict)
+                or messages[0].get("role") != "user"
+            ):
+                raise HTTPException(status_code=400, detail={"error": "file output requires one isolated user message"})
+            content = messages[0].get("content")
+            parts = [{"type": "text", "text": content}] if isinstance(content, str) else content
+            if not isinstance(parts, list) or any(
+                not isinstance(part, dict) or part.get("type") not in {"text", "file", "input_file"}
+                for part in parts
+            ):
+                raise HTTPException(status_code=400, detail={"error": "file output accepts text and original files only"})
+            if any(part.get("type") == "text" and not isinstance(part.get("text"), str) for part in parts):
+                raise HTTPException(status_code=400, detail={"error": "file output text must be a string"})
+            prompt = "\n".join(part["text"] for part in parts if part.get("type") == "text")
+            original_files = [part for part in parts if part.get("type") in {"file", "input_file"}]
+            task_id = payload.get("client_task_id")
+            if not isinstance(task_id, str) or not task_id.strip():
+                raise HTTPException(status_code=400, detail={"error": "client_task_id is required for file output"})
+            model = str(payload.get("model") or "").strip()
+            if not model or model == "auto":
+                raise HTTPException(status_code=400, detail={"error": "explicit file model is required"})
+            await filter_or_log(
+                LoggedCall(identity, "/v1/chat/completions", model, "原生文件生成", request_text=prompt),
+                prompt,
+            )
+            task = await submit_editable_file_task(
+                editable_file_task_service.submit_file,
+                identity,
+                client_task_id=task_id,
+                prompt=prompt,
+                model=model,
+                transport="chat",
+                thinking_effort=str(payload.get("thinking_effort") or payload.get("reasoning_effort") or ""),
+                output_bundle=str(payload.get("output_bundle") or "zip"),
+                output_filename=str(payload.get("output_filename") or "result.txt"),
+                input_files=original_files,
+                base_url=payload["base_url"],
+            )
+            return {
+                "id": f"chatcmpl-{task.get('id')}",
+                "object": "chat.completion",
+                "created": 0,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": "stop",
+                }],
+                "output_type": "file",
+                "file_task": task,
+            }
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
         image_chat = is_image_chat_request(payload)
@@ -247,25 +313,61 @@ def create_router() -> APIRouter:
         task_ids = [item.strip() for item in ids.split(",") if item.strip()]
         return await run_in_threadpool(editable_file_task_service.list_tasks, identity, task_ids, limit=limit)
 
+    @router.post("/v1/editable-file-tasks/{task_id}/recover")
+    async def recover_editable_file_task(
+        task_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        recovered = await run_in_threadpool(
+            editable_file_task_service.recover_native_output,
+            identity,
+            task_id,
+            base_url=resolve_image_base_url(request),
+        )
+        if recovered is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "file task is not recoverable"},
+            )
+        return recovered
+
     @router.post("/v1/editable-file-tasks")
     async def create_editable_file_task(body: EditableFileTaskRequest, request: Request, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         kind = (body.kind or "ppt").strip().lower()
-        if kind not in {"ppt", "psd"}:
-            raise HTTPException(status_code=400, detail={"error": "kind must be ppt or psd"})
+        if kind not in {"ppt", "psd", "file"}:
+            raise HTTPException(status_code=400, detail={"error": "kind must be ppt, psd or file"})
         endpoint = f"/v1/{kind}/generations"
         await filter_or_log(
-            LoggedCall(identity, endpoint, "gpt-5-5-thinking", f"{kind.upper()} generation task", request_text=body.prompt),
+            LoggedCall(identity, endpoint, body.model, f"{kind.upper()} generation task", request_text=body.prompt),
             body.prompt,
         )
-        submit = editable_file_task_service.submit_psd if kind == "psd" else editable_file_task_service.submit_ppt
+        submit = {
+            "ppt": editable_file_task_service.submit_ppt,
+            "psd": editable_file_task_service.submit_psd,
+            "file": editable_file_task_service.submit_file,
+        }[kind]
+        kwargs: dict[str, object] = {
+            "client_task_id": body.client_task_id or "",
+            "prompt": body.prompt,
+            "model": body.model,
+            "base_url": resolve_image_base_url(request),
+        }
+        if kind == "file":
+            kwargs.update({
+                "output_filename": body.output_filename,
+                "output_bundle": body.output_bundle,
+                "thinking_effort": body.thinking_effort,
+                "input_files": body.input_files,
+            })
+        else:
+            kwargs["base64_images"] = body.base64_images
         return await submit_editable_file_task(
             submit,
             identity,
-            client_task_id=body.client_task_id or "",
-            prompt=body.prompt,
-            base64_images=body.base64_images,
-            base_url=resolve_image_base_url(request),
+            **kwargs,
         )
 
     @router.delete("/v1/editable-file-tasks/{task_id}")

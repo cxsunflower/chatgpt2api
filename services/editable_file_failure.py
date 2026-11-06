@@ -36,6 +36,8 @@ def public_editable_file_error_message(failure: ImageFailure) -> str:
         "invalid_image_input",
         "upstream_text_reply",
         "unsupported_model",
+        "model_not_found",
+        "image_model_not_found",
     }:
         return EDITABLE_FILE_REQUEST_PUBLIC_MESSAGE
     if failure.code in {

@@ -139,7 +139,7 @@ Authorization: Bearer <auth-key>
 
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
-| `/v1/models` | `GET` | Returns the shared console model catalog; default chat models are `gpt-5.6` and `auto` |
+| `/v1/models` | `GET` | Returns the shared console catalog with account-observed models and fallback chains |
 | `/v1/chat/completions` | `POST` | Chat Completions entry point for text, search, and image scenarios |
 | `/v1/responses` | `POST` | Responses entry point with text, search, and image tools |
 | `/v1/messages` | `POST` | Anthropic Messages-compatible entry point |

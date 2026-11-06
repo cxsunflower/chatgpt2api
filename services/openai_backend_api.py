@@ -20,6 +20,19 @@ from urllib.parse import unquote, urlparse
 from curl_cffi import CurlInfo, CurlOpt, requests
 from PIL import Image
 
+from services.native_file_support import (
+    EXPORT_FILE_RE,
+    MAX_FILE_BYTES,
+    MAX_FILES,
+    MAX_TOTAL_BYTES,
+    NativeFileError,
+    clean_generated_text,
+    decode_file_part,
+    file_name,
+    repair_generated_code,
+    signed_asset_url,
+    validate_download,
+)
 from services.account_service import account_service
 from services.config import config
 from services.editable_file_failure import EditableFileFailureError
@@ -191,6 +204,13 @@ class EditableFileExportResult:
     conversation_id: str
     primary_path: Path
     zip_path: Path
+
+
+@dataclass
+class NativeFileExportResult:
+    conversation_id: str
+    files: list[Path]
+    text: str = ""
 
 
 class OpenAIBackendAPI:
@@ -703,18 +723,21 @@ class OpenAIBackendAPI:
                 raise RuntimeError("only string or list message content is supported")
             text_parts: list[str] = []
             image_inputs: list[tuple[bytes, str]] = []
+            file_inputs: list[dict[str, Any]] = []
             for part in content:
                 if not isinstance(part, dict):
                     continue
                 part_type = str(part.get("type") or "")
                 if part_type == "text":
                     text_parts.append(str(part.get("text") or ""))
+                elif part_type in {"file", "input_file"}:
+                    file_inputs.append(decode_file_part(part))
                 elif part_type == "image":
                     data = part.get("data")
                     mime = str(part.get("mime") or "image/png")
                     if isinstance(data, (bytes, bytearray)):
                         image_inputs.append((bytes(data), mime))
-            if not image_inputs:
+            if not image_inputs and not file_inputs:
                 conversation_messages.append({
                     "id": new_uuid(),
                     "author": {"role": role},
@@ -729,6 +752,7 @@ class OpenAIBackendAPI:
                 extension = "jpg" if ext_part == "jpeg" else (ext_part or "png")
                 b64 = base64.b64encode(data).decode("ascii")
                 uploaded.append(self._upload_image(f"data:{mime};base64,{b64}", f"image_{idx}.{extension}"))
+            documents = [self._upload_native_file(item) for item in file_inputs]
             parts: list[Any] = []
             for ref in uploaded:
                 parts.append({
@@ -741,19 +765,27 @@ class OpenAIBackendAPI:
             text = "".join(text_parts)
             if text:
                 parts.append(text)
+            attachments = [{
+                "id": ref["file_id"],
+                "mimeType": ref["mime_type"],
+                "name": ref["file_name"],
+                "size": ref["file_size"],
+                "width": ref["width"],
+                "height": ref["height"],
+            } for ref in uploaded] + [{
+                "id": ref["file_id"],
+                "mimeType": ref["mime_type"],
+                "name": ref["file_name"],
+                "size": ref["file_size"],
+                "source": "local",
+                "is_big_paste": False,
+            } for ref in documents]
             conversation_messages.append({
                 "id": new_uuid(),
                 "author": {"role": role},
-                "content": {"content_type": "multimodal_text", "parts": parts},
+                "content": {"content_type": "multimodal_text" if uploaded else "text", "parts": parts},
                 "metadata": {
-                    "attachments": [{
-                        "id": ref["file_id"],
-                        "mimeType": ref["mime_type"],
-                        "name": ref["file_name"],
-                        "size": ref["file_size"],
-                        "width": ref["width"],
-                        "height": ref["height"],
-                    } for ref in uploaded],
+                    "attachments": attachments,
                 },
             })
         return conversation_messages
@@ -799,6 +831,12 @@ class OpenAIBackendAPI:
         normalized_effort = normalize_thinking_effort(thinking_effort)
         if normalized_effort:
             payload["thinking_effort"] = normalized_effort
+        if any(
+            isinstance(message.get("content"), list)
+            and any(isinstance(part, dict) and part.get("type") == "file" for part in message["content"])
+            for message in messages
+        ):
+            payload["history_and_training_disabled"] = False
         return payload
 
     def _image_model_slug(self, model: str) -> str:
@@ -1497,6 +1535,342 @@ class OpenAIBackendAPI:
         extra = str(user_prompt_text or "").strip()
         return fixed_prompt if not extra else fixed_prompt + "\n\n以下是用户补充需求，请直接结合执行：\n" + extra
 
+    def export_file(
+            self,
+            prompt: str,
+            output_dir: str | Path,
+            *,
+            model: str = "gpt-6",
+            output_filename: str = "result.txt",
+            timeout_secs: float,
+            poll_interval_secs: float = 3,
+            input_files: list | None = None,
+            transport: str = "editable",
+            thinking_effort: str = "",
+    ) -> NativeFileExportResult:
+        """Generate real files through one upstream turn and download only that turn's output."""
+        if transport not in {"editable", "chat"}:
+            raise NativeFileError("invalid_generation_transport")
+        output_filename = file_name(output_filename)
+        if not model.strip() or model == "auto":
+            raise NativeFileError("explicit_file_model_required")
+        if not self.access_token:
+            raise NativeFileError("generation_auth_required")
+        output = Path(output_dir).expanduser().resolve()
+        output.mkdir(parents=True, exist_ok=True, mode=0o700)
+        deadline = time.monotonic() + max(0.001, float(timeout_secs))
+        originals: list[dict[str, Any]] = []
+        for part in input_files or []:
+            item = decode_file_part(part)
+            originals.append(item)
+        if len(originals) > MAX_FILES or sum(len(item["data"]) for item in originals) > MAX_TOTAL_BYTES:
+            raise NativeFileError("input_quota_exceeded")
+        instructions = (
+            prompt.strip()
+            + "\n\nCreate the requested actual downloadable file(s) with the available native file/code tool. "
+            + "Preserve the user's requested filenames and every original extension. Save outputs under /mnt/data/. "
+            + "Return sandbox download links to ALL final requested output files, not intermediate files. "
+            + f"If no filename was requested, {output_filename} is only a fallback suggestion for a single output. "
+            + "Do not rename existing outputs to that fallback. Do not merely print contents or invent URLs. "
+            + "Use English half-width quotes in code and strings; files must be runnable or parseable as applicable."
+        )
+        try:
+            conversation_id = ""
+            if transport == "chat":
+                content = [{"type": "text", "text": instructions}, *originals]
+                try:
+                    for payload in self.stream_conversation(
+                        messages=[{"role": "user", "content": content}],
+                        model=model,
+                        thinking_effort=thinking_effort,
+                        deadline=deadline,
+                        file_output=True,
+                    ):
+                        self._editable_request_timeout(deadline, 300)
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            parsed = json.loads(payload) if isinstance(payload, str) else payload
+                        except (TypeError, json.JSONDecodeError):
+                            parsed = payload
+                        conversation_id = conversation_id or self._find_editable_value(payload, "conversation_id")
+                        failure = classify_upstream_message(parsed)
+                        if failure is not None and failure.code != "upstream_text_reply":
+                            raise EditableFileFailureError(failure=failure)
+                except Exception as exc:
+                    if not conversation_id or not self._native_stream_recoverable(exc):
+                        raise
+            else:
+                self.client_version = EDITABLE_FILE_CLIENT_VERSION
+                self.client_build_number = EDITABLE_FILE_CLIENT_BUILD_NUMBER
+                self.session.headers["OAI-Client-Version"] = EDITABLE_FILE_CLIENT_VERSION
+                self.session.headers["OAI-Client-Build-Number"] = EDITABLE_FILE_CLIENT_BUILD_NUMBER
+                uploaded = [self._upload_native_file(item, deadline=deadline) for item in originals]
+                conduit = self._prepare_editable_conversation(
+                    instructions,
+                    [item["mime_type"] for item in uploaded],
+                    deadline=deadline,
+                    model=model,
+                    thinking_effort=thinking_effort,
+                )
+                conversation_id = self._run_editable_conversation(
+                    instructions,
+                    uploaded,
+                    conduit,
+                    deadline=deadline,
+                    model=model,
+                    thinking_effort=thinking_effort,
+                )
+            if not conversation_id:
+                raise NativeFileError("generation_conversation_id_missing")
+            detail = self._wait_native_file_detail(
+                conversation_id,
+                deadline,
+                poll_interval_secs,
+            )
+            final_text = clean_generated_text(self._native_file_final_text(detail))
+            artifacts = self._extract_native_file_artifacts(detail)
+            if not artifacts and not final_text:
+                raise NativeFileError("generation_no_actual_output")
+            downloaded: list[Path] = []
+            seen_names: set[str] = set()
+            total_bytes = 0
+            for artifact in artifacts:
+                if len(downloaded) >= MAX_FILES:
+                    raise NativeFileError("output_count_limit")
+                path = self._download_native_file_artifact(
+                    conversation_id,
+                    artifact,
+                    output,
+                    deadline=deadline,
+                )
+                data = path.read_bytes()
+                total_bytes += len(data)
+                if total_bytes > MAX_TOTAL_BYTES:
+                    raise NativeFileError("output_total_size_limit")
+                if path.name.casefold() in seen_names:
+                    raise NativeFileError("output_duplicate_name")
+                seen_names.add(path.name.casefold())
+                repaired = repair_generated_code(data, path.name)
+                if repaired != data:
+                    path.write_bytes(repaired)
+                    logger.info({"event": "native_file_quote_repaired", "name": path.name})
+                validate_download(path.read_bytes(), path.name, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+                downloaded.append(path)
+            return NativeFileExportResult(
+                conversation_id=conversation_id,
+                files=downloaded,
+                text=final_text,
+            )
+        except UpstreamHTTPError as exc:
+            self._raise_editable_http_failure(exc, "native_file_export_http_failure")
+
+    def _upload_native_file(self, item: dict[str, Any], *, deadline: float | None = None) -> Dict[str, Any]:
+        data = item["data"]
+        name = file_name(item["filename"])
+        mime = str(item.get("mime") or "application/octet-stream")
+        path = "/backend-api/files"
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._headers(path, {"Accept": "application/json", "Content-Type": "application/json"}),
+            json={
+                "file_name": name,
+                "file_size": len(data),
+                "use_case": "ace_upload",
+                "timezone_offset_min": -480,
+                "reset_rate_limits": False,
+            },
+            timeout=self._editable_request_timeout(deadline, 60),
+        )
+        ensure_ok(response, path)
+        payload = response.json()
+        file_id = str(payload.get("file_id") or "")
+        if not re.fullmatch(r"file[-_][A-Za-z0-9_-]+", file_id):
+            raise NativeFileError("upload_missing_file_id")
+        upload_url = signed_asset_url(str(payload.get("upload_url") or ""))
+        response = self.session.put(
+            upload_url,
+            data=data,
+            allow_redirects=False,
+            headers=self._signed_asset_headers({
+                "Content-Type": mime,
+                "x-ms-blob-type": "BlockBlob",
+                "x-ms-version": "2020-04-08",
+                "Origin": self.base_url,
+                "Referer": self.base_url + "/",
+            }),
+            timeout=self._editable_request_timeout(deadline, 120),
+        )
+        ensure_ok(response, "native_file_upload", credential_scope="signed_asset")
+        path = f"/backend-api/files/{file_id}/uploaded"
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._headers(path, {"Accept": "application/json", "Content-Type": "application/json"}),
+            data="{}",
+            timeout=self._editable_request_timeout(deadline, 60),
+        )
+        ensure_ok(response, path)
+        return {
+            "file_id": file_id,
+            "library_file_id": str(payload.get("library_file_id") or ""),
+            "file_name": name,
+            "file_size": len(data),
+            "mime_type": mime,
+            "width": 0,
+            "height": 0,
+        }
+
+    def _wait_native_file_detail(
+            self,
+            conversation_id: str,
+            deadline: float,
+            poll_interval_secs: float,
+    ) -> dict[str, Any]:
+        last_error: Exception | None = None
+        while True:
+            try:
+                detail = self._get_editable_conversation_detail(conversation_id, deadline=deadline)
+            except Exception as exc:
+                if not self._native_stream_recoverable(exc):
+                    raise
+                last_error = exc
+            else:
+                failure = classify_conversation_failure(detail)
+                if failure is not None and failure.code not in {"upstream_text_reply", "image_model_not_found"}:
+                    raise EditableFileFailureError(failure=failure)
+                if self._native_file_detail_terminal(detail):
+                    return detail
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise last_error or NativeFileError("generation_poll_timeout")
+            time.sleep(min(max(0.1, float(poll_interval_secs)), remaining))
+
+    def recover_file(
+        self,
+        conversation_id: str,
+        output_dir: str | Path,
+        *,
+        output_filename: str = "result.txt",
+        timeout_secs: float,
+        poll_interval_secs: float = 3,
+    ) -> NativeFileExportResult:
+        """Recover a submitted file turn using GET only; never POST again."""
+        cid = str(conversation_id or "").strip()
+        if not cid:
+            raise NativeFileError("generation_conversation_id_missing")
+        if not self.access_token:
+            raise NativeFileError("generation_auth_required")
+        output = Path(output_dir).expanduser().resolve()
+        output.mkdir(parents=True, exist_ok=True, mode=0o700)
+        deadline = time.monotonic() + max(0.001, float(timeout_secs))
+        detail = self._wait_native_file_detail(cid, deadline, poll_interval_secs)
+        final_text = clean_generated_text(self._native_file_final_text(detail))
+        artifacts = self._extract_native_file_artifacts(detail)
+        downloaded: list[Path] = []
+        total = 0
+        for artifact in artifacts:
+            if len(downloaded) >= MAX_FILES:
+                raise NativeFileError("output_count_limit")
+            path = self._download_native_file_artifact(
+                cid, artifact, output, deadline=deadline
+            )
+            data = path.read_bytes()
+            total += len(data)
+            if total > MAX_TOTAL_BYTES:
+                raise NativeFileError("output_total_size_limit")
+            repaired = repair_generated_code(data, path.name)
+            if repaired != data:
+                path.write_bytes(repaired)
+            downloaded.append(path)
+        if not downloaded and not final_text:
+            raise NativeFileError("generation_no_actual_output")
+        return NativeFileExportResult(
+            conversation_id=cid,
+            files=downloaded,
+            text=final_text,
+        )
+
+    @staticmethod
+    def _native_file_detail_terminal(detail: dict[str, Any]) -> bool:
+        messages = []
+        for node in (detail.get("mapping") or {}).values():
+            message = (node or {}).get("message") or {}
+            if (message.get("author") or {}).get("role") == "assistant":
+                messages.append(message)
+        return any(bool(message.get("end_turn")) for message in messages)
+
+    @staticmethod
+    def _native_file_final_text(detail: dict[str, Any]) -> str:
+        candidates: list[tuple[float, str]] = []
+        for node in (detail.get("mapping") or {}).values():
+            message = (node or {}).get("message") or {}
+            if (message.get("author") or {}).get("role") != "assistant":
+                continue
+            if message.get("recipient") not in (None, "", "all"):
+                continue
+            if message.get("channel") not in (None, "", "final"):
+                continue
+            content = message.get("content") or {}
+            if content.get("content_type") not in {None, "", "text"}:
+                continue
+            text = "".join(str(part) for part in content.get("parts") or [] if isinstance(part, str)).strip()
+            if text:
+                candidates.append((float(message.get("create_time") or 0), text))
+        return max(candidates, key=lambda item: item[0])[1] if candidates else ""
+
+    def _extract_native_file_artifacts(self, detail: dict[str, Any]) -> list[EditableFileArtifact]:
+        return [
+            artifact
+            for artifact in self._extract_editable_artifacts(detail, EXPORT_FILE_RE)
+            if artifact.author_role in {"assistant", "tool"}
+            and bool(artifact.name or artifact.sandbox_path or artifact.file_id or artifact.attachment_id)
+        ]
+
+    def _download_native_file_artifact(
+            self,
+            conversation_id: str,
+            artifact: EditableFileArtifact,
+            output_dir: Path,
+            *,
+            deadline: float | None = None,
+    ) -> Path:
+        download_url = ""
+        last_error: Exception | None = None
+        while True:
+            try:
+                download_url = self._resolve_editable_download_url(
+                    conversation_id,
+                    artifact,
+                    deadline=deadline,
+                )
+            except Exception as exc:
+                if not self._native_stream_recoverable(exc):
+                    raise
+                last_error = exc
+            if download_url:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                raise last_error or NativeFileError("download_url_missing")
+            time.sleep(min(1.0, max(0.1, (deadline or time.monotonic() + 1) - time.monotonic())))
+        response = self.session.get(
+            download_url,
+            headers=self._signed_asset_headers(),
+            allow_redirects=False,
+            timeout=self._editable_request_timeout(deadline, 300),
+        )
+        if not 200 <= response.status_code < 300:
+            raise NativeFileError("download_http_" + str(response.status_code))
+        data = bytes(response.content or b"")
+        name = self._sanitize_editable_filename(artifact.name) or self._sanitize_editable_filename(Path(artifact.sandbox_path).name)
+        if not name:
+            name = self._sanitize_editable_filename(Path(urlparse(download_url).path).name) or "artifact.bin"
+        name = self._unique_editable_path(output_dir / name).name
+        validate_download(data, name, self._clean_editable_mime_type(response.headers.get("Content-Type")) or mimetypes.guess_type(name)[0] or "application/octet-stream")
+        target = output_dir / name
+        target.write_bytes(data)
+        target.chmod(0o600)
+        return target
+
     def export_ppt_zip(
             self,
             base64_images: list[str] | None,
@@ -1720,13 +2094,15 @@ class OpenAIBackendAPI:
             attachment_mime_types: list[str],
             *,
             deadline: float | None = None,
+            model: str = EDITABLE_FILE_MODEL,
+            thinking_effort: str = EDITABLE_FILE_THINKING_EFFORT,
     ) -> str:
         path = "/backend-api/f/conversation/prepare"
         payload: Dict[str, Any] = {
             "action": "next",
             "fork_from_shared_post": False,
             "parent_message_id": "client-created-root",
-            "model": EDITABLE_FILE_MODEL,
+            "model": model,
             "client_prepare_state": "success",
             "timezone_offset_min": -480,
             "timezone": "Asia/Shanghai",
@@ -1736,7 +2112,7 @@ class OpenAIBackendAPI:
             "supports_buffering": True,
             "supported_encodings": ["v1"],
             "client_contextual_info": {"app_name": "chatgpt.com"},
-            "thinking_effort": EDITABLE_FILE_THINKING_EFFORT,
+            "thinking_effort": normalize_thinking_effort(thinking_effort),
         }
         if attachment_mime_types:
             payload["attachment_mime_types"] = attachment_mime_types
@@ -1759,6 +2135,8 @@ class OpenAIBackendAPI:
             conduit_token: str,
             *,
             deadline: float | None = None,
+            model: str = EDITABLE_FILE_MODEL,
+            thinking_effort: str = EDITABLE_FILE_THINKING_EFFORT,
     ) -> str:
         self._bootstrap(timeout_secs=self._editable_request_timeout(deadline, 30))
         requirements = self._get_chat_requirements(
@@ -1805,7 +2183,7 @@ class OpenAIBackendAPI:
                 "action": "next",
                 "messages": [message],
                 "parent_message_id": "client-created-root",
-                "model": EDITABLE_FILE_MODEL,
+                "model": model,
                 "client_prepare_state": "sent",
                 "timezone_offset_min": -480,
                 "timezone": "Asia/Shanghai",
@@ -1826,7 +2204,7 @@ class OpenAIBackendAPI:
                 },
                 "paragen_cot_summary_display_override": "allow",
                 "force_parallel_switch": "auto",
-                "thinking_effort": EDITABLE_FILE_THINKING_EFFORT,
+                "thinking_effort": normalize_thinking_effort(thinking_effort),
             },
             timeout=self._editable_request_timeout(deadline, 300),
             stream=True,
@@ -2376,6 +2754,47 @@ class OpenAIBackendAPI:
         if remaining <= 0:
             raise TimeoutError(message)
         return max(0.001, remaining)
+
+    @staticmethod
+    def _native_get_status(exc: Exception) -> int:
+        current: Exception | None = exc
+        for _ in range(4):
+            failure = getattr(current, "failure", None)
+            status = getattr(current, "status_code", None) or getattr(failure, "status_code", None)
+            if isinstance(status, int):
+                return status
+            stage = str(getattr(current, "stage", ""))
+            if stage.startswith("download_http_") and stage.removeprefix("download_http_").isdigit():
+                return int(stage.removeprefix("download_http_"))
+            current = getattr(current, "__cause__", None)
+            if current is None:
+                break
+        return 0
+
+    @classmethod
+    def _native_stream_recoverable(cls, exc: Exception) -> bool:
+        """Whether a submitted turn may be recovered by GET without re-submitting."""
+        status = cls._native_get_status(exc)
+        if status:
+            return status in {408, 425, 429, 500, 502, 503, 504}
+        current: Exception | None = exc
+        for _ in range(4):
+            if isinstance(
+                current,
+                (
+                    TimeoutError,
+                    ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError,
+                ),
+            ):
+                return True
+            if getattr(current, "stage", "") == "download_url_missing":
+                return True
+            current = getattr(current, "__cause__", None)
+            if current is None:
+                break
+        return False
 
     @classmethod
     def _remaining_search_timeout(cls, deadline: float) -> float:
@@ -3581,6 +4000,8 @@ class OpenAIBackendAPI:
             images: Optional[list[str]] = None,
             system_hints: Optional[list[str]] = None,
             thinking_effort: str = "",
+            deadline: float | None = None,
+            file_output: bool = False,
     ) -> Iterator[str]:
         system_hints = system_hints or []
         if "picture_v2" in system_hints:
@@ -3588,15 +4009,21 @@ class OpenAIBackendAPI:
             return
 
         normalized = messages or [{"role": "user", "content": prompt}]
-        self._bootstrap()
-        requirements = self._get_chat_requirements()
+        self._bootstrap(timeout_secs=self._editable_request_timeout(deadline, 30))
+        requirements = self._get_chat_requirements(
+            timeout_secs=self._editable_request_timeout(deadline, 30),
+            deadline=deadline,
+            timeout_message="file task timed out",
+        )
         path, timezone = self._chat_target()
         payload = self._conversation_payload(normalized, model, timezone, thinking_effort=thinking_effort)
+        if file_output:
+            payload["history_and_training_disabled"] = False
         response = self.session.post(
             self.base_url + path,
             headers=self._conversation_headers(path, requirements),
             json=payload,
-            timeout=300,
+            timeout=self._editable_request_timeout(deadline, 300),
             stream=True,
         )
         ensure_ok(response, path)

@@ -92,6 +92,16 @@ _Avoid_: Default proxy, proxy runtime egress
 The backend projection of supported text and image models, defaults, and model-related capabilities.
 _Avoid_: A page-local model list
 
+**Account Model Capability**:
+The last observed model inventory and sync outcome for an Upstream Account. It
+may filter scheduling only when observed; absence means unknown, not unavailable.
+_Avoid_: A second global model cache
+
+**Model Fallback Chain**:
+The ordered models a public request may try after an explicit model-unavailable
+failure and before any content or artifact has been emitted.
+_Avoid_: Account switch, transport retry
+
 **Prompt Source**:
 A configured upstream or bundled origin whose validated snapshot contributes items to the prompt library.
 _Avoid_: Prompt item

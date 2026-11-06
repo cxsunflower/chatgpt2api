@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from itertools import chain
 from typing import Any, Iterable, Iterator
 
 from fastapi import HTTPException
@@ -23,7 +24,11 @@ from services.protocol.conversation import (
     text_backend,
     validate_gif_request,
 )
-from services.protocol.reasoning import thinking_effort_from_body
+from services.protocol.reasoning import thinking_control_from_body, thinking_effort_from_body
+from services.model_selection_service import (
+    model_chain,
+    model_unavailable_from_error,
+)
 from services.protocol.web_search_tool import (
     WEB_SEARCH_TOOL_TYPES,
     has_unsupported_tools,
@@ -135,26 +140,37 @@ def stream_text_chat_completion(
 ) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    sent_role = False
-    request = ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)
-    for delta_text in stream_text_deltas(backend, request):
-        if not sent_role:
-            sent_role = True
-            yield _with_log_metadata(
-                completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created),
-                _backend_account_email(backend),
-            )
-        else:
-            yield _with_log_metadata(
-                completion_chunk(model, {"content": delta_text}, None, completion_id, created),
-                _backend_account_email(backend),
-            )
-    if not sent_role:
-        yield _with_log_metadata(
-            completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created),
-            _backend_account_email(backend),
+    for selected_model in model_chain(model):
+        sent_role = False
+        request = ConversationRequest(
+            model=selected_model,
+            messages=messages,
+            thinking_effort=thinking_effort,
         )
-    yield _with_log_metadata(completion_chunk(model, {}, "stop", completion_id, created), _backend_account_email(backend))
+        try:
+            for delta_text in stream_text_deltas(backend, request):
+                if not sent_role:
+                    sent_role = True
+                    yield _with_log_metadata(
+                        completion_chunk(selected_model, {"role": "assistant", "content": delta_text}, None, completion_id, created),
+                        _backend_account_email(backend),
+                    )
+                else:
+                    yield _with_log_metadata(
+                        completion_chunk(selected_model, {"content": delta_text}, None, completion_id, created),
+                        _backend_account_email(backend),
+                    )
+        except Exception as exc:
+            if not sent_role and model_unavailable_from_error(exc):
+                continue
+            raise
+        if not sent_role:
+            yield _with_log_metadata(
+                completion_chunk(selected_model, {"role": "assistant", "content": ""}, None, completion_id, created),
+                _backend_account_email(backend),
+            )
+        yield _with_log_metadata(completion_chunk(selected_model, {}, "stop", completion_id, created), _backend_account_email(backend))
+        return
 
 
 def collect_chat_content(chunks: Iterable[dict[str, Any]]) -> str:
@@ -254,21 +270,38 @@ def image_result_content(result: dict[str, Any]) -> str:
 
 def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
     model, prompt, n, images, base_url, output_format, frame_count, frame_duration_ms = chat_image_args(body)
-    result = collect_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
-        prompt=prompt,
-        model=model,
-        n=n,
-        response_format="b64_json",
-        output_format=output_format,
-        frame_count=frame_count,
-        frame_duration_ms=frame_duration_ms,
-        images=encode_images(images) or None,
-        base_url=base_url,
-        message_as_error=True,
-        call_id=str(body.get("_call_id") or ""),
-        trace_image_perf=bool(body.get("_trace_image_perf")),
-    )))
-    response = completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
+    responses: list[dict[str, Any]] = []
+    selected_models: list[str] = []
+    for selected_model in model_chain(model, image=True):
+        selected_models.append(selected_model)
+        try:
+            result = collect_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
+                prompt=prompt,
+                model=selected_model,
+                n=n,
+                size=body.get("size"),
+                quality=str(body.get("quality") or "auto"),
+                response_format="b64_json",
+                output_format=output_format,
+                frame_count=frame_count,
+                frame_duration_ms=frame_duration_ms,
+                images=encode_images(images) or None,
+                base_url=base_url,
+                message_as_error=True,
+                call_id=str(body.get("_call_id") or ""),
+                trace_image_perf=bool(body.get("_trace_image_perf")),
+            )))
+            responses.append(result)
+            break
+        except Exception as exc:
+            if model_unavailable_from_error(exc):
+                continue
+            raise
+    if not responses:
+        raise HTTPException(status_code=503, detail={"error": "no fallback image model available"})
+    result = responses[0]
+    selected_model = selected_models[-1]
+    response = completion_response(selected_model, image_result_content(result), int(result.get("created") or 0) or None)
     usage = image_usage(
         input_text_tokens=count_text_tokens(prompt, model),
         input_image_tokens=count_image_inputs_tokens(images, model),
@@ -288,21 +321,38 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
 
 def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     model, prompt, n, images, base_url, output_format, frame_count, frame_duration_ms = chat_image_args(body)
-    image_outputs = stream_image_outputs_with_pool(ConversationRequest(
-        prompt=prompt,
-        model=model,
-        n=n,
-        response_format="b64_json",
-        output_format=output_format,
-        frame_count=frame_count,
-        frame_duration_ms=frame_duration_ms,
-        images=encode_images(images) or None,
-        base_url=base_url,
-        message_as_error=True,
-        call_id=str(body.get("_call_id") or ""),
-        trace_image_perf=bool(body.get("_trace_image_perf")),
-    ))
-    yield from stream_image_chat_completion(image_outputs, model)
+    def selected_outputs(selected_model: str):
+        return stream_image_outputs_with_pool(ConversationRequest(
+            prompt=prompt,
+            model=selected_model,
+            n=n,
+            size=body.get("size"),
+            quality=str(body.get("quality") or "auto"),
+            response_format="b64_json",
+            output_format=output_format,
+            frame_count=frame_count,
+            frame_duration_ms=frame_duration_ms,
+            images=encode_images(images) or None,
+            base_url=base_url,
+            message_as_error=True,
+            call_id=str(body.get("_call_id") or ""),
+            trace_image_perf=bool(body.get("_trace_image_perf")),
+        ))
+
+    for selected_model in model_chain(model, image=True):
+        image_outputs = selected_outputs(selected_model)
+        iterator = iter(image_outputs)
+        try:
+            first = next(iterator)
+        except StopIteration:
+            raise RuntimeError("image stream produced no output") from None
+        except Exception as exc:
+            if model_unavailable_from_error(exc):
+                continue
+            raise
+        yield from stream_image_chat_completion(chain([first], iterator), selected_model)
+        return
+    raise HTTPException(status_code=503, detail={"error": "no fallback image model available"})
 
 
 def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: str) -> Iterator[dict[str, Any]]:
@@ -346,13 +396,31 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
 
 
 def text_completion_response(model: str, messages: list[dict[str, Any]], thinking_effort: str) -> dict[str, Any]:
-    backend = text_backend()
-    response = completion_response(
-        model,
-        collect_text(backend, ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)),
-        messages=messages,
-    )
-    return _with_log_metadata(response, _backend_account_email(backend))
+    last_error: Exception | None = None
+    for selected_model in model_chain(model):
+        backend = text_backend(selected_model)
+        try:
+            response = completion_response(
+                selected_model,
+                collect_text(
+                    backend,
+                    ConversationRequest(
+                        model=selected_model,
+                        messages=messages,
+                        thinking_effort=thinking_effort,
+                    ),
+                ),
+                messages=messages,
+            )
+            return _with_log_metadata(response, _backend_account_email(backend))
+        except Exception as exc:
+            last_error = exc
+            if model_unavailable_from_error(exc):
+                continue
+            raise
+    if last_error is not None:
+        raise last_error
+    raise HTTPException(status_code=503, detail={"error": "no fallback model available"})
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
@@ -367,18 +435,18 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         model, messages = text_chat_parts(body)
         if is_web_search_chat_request(body) and not has_unsupported_tools(body, WEB_SEARCH_TOOL_TYPES):
             return stream_web_search_chat_completion(messages, model)
-        thinking_effort = thinking_effort_from_body(body)
+        _, thinking_effort = thinking_control_from_body(body)
         key = cache_key(body, messages, stream=True)
         return chat_completion_cache.get_or_compute_stream(
             key,
-            lambda: stream_text_chat_completion(text_backend(), messages, model, thinking_effort),
+            lambda: stream_text_chat_completion(text_backend(model), messages, model, thinking_effort),
         )
     if is_image_chat_request(body):
         return image_chat_response(body)
     model, messages = text_chat_parts(body)
     if is_web_search_chat_request(body) and not has_unsupported_tools(body, WEB_SEARCH_TOOL_TYPES):
         return web_search_chat_response(messages, model)
-    thinking_effort = thinking_effort_from_body(body)
+    _, thinking_effort = thinking_control_from_body(body)
     key = cache_key(body, messages, stream=False)
     return chat_completion_cache.get_or_compute_response(
         key,

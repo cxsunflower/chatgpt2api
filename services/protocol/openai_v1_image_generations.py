@@ -11,6 +11,7 @@ from services.protocol.conversation import (
     stream_image_outputs_with_pool,
     validate_gif_request,
 )
+from services.model_selection_service import with_model_fallback
 from utils.image_tokens import count_image_output_items_tokens, image_usage
 
 
@@ -27,22 +28,26 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     validate_gif_request(model, output_format, stream=bool(body.get("stream")))
     base_url = str(body.get("base_url") or "") or None
     progress_callback = body.get("progress_callback")
-    outputs = stream_image_outputs_with_pool(ConversationRequest(
-        prompt=prompt,
-        model=model,
-        n=n,
-        size=size,
-        quality=quality,
-        response_format=response_format,
-        output_format=output_format,
-        frame_count=frame_count,
-        frame_duration_ms=frame_duration_ms,
-        base_url=base_url,
-        message_as_error=True,
-        progress_callback=progress_callback,
-        call_id=str(body.get("_call_id") or ""),
-        trace_image_perf=bool(body.get("_trace_image_perf")),
-    ))
+    outputs = with_model_fallback(
+        model,
+        lambda selected_model: stream_image_outputs_with_pool(ConversationRequest(
+                prompt=prompt,
+                model=selected_model,
+                n=n,
+                size=size,
+                quality=quality,
+                response_format=response_format,
+                output_format=output_format,
+                frame_count=frame_count,
+                frame_duration_ms=frame_duration_ms,
+                base_url=base_url,
+                message_as_error=True,
+                progress_callback=progress_callback,
+                call_id=str(body.get("_call_id") or ""),
+                trace_image_perf=bool(body.get("_trace_image_perf")),
+            )),
+        image=True,
+    )
     if body.get("stream"):
         input_text_tokens = count_text_tokens(prompt, model)
         return stream_image_chunks(

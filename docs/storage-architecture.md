@@ -13,6 +13,7 @@
 | --- | --- | --- |
 | 上游账号与 User Key | Account Repository | Application Database |
 | 系统配置与代理设置 | `ConfigStore` 的配置 Repository | Application Database |
+| 账号模型能力快照 | `AccountService` | 既有 Account Repository JSON 记录中的增量字段；旧记录无需迁移 |
 | 调用日志 | `LogService` 的 Call Record Repository | Application Database |
 | 概览指标 | `DashboardMetricsService` 的 Dashboard Metric Projection | Application Database 中的状态、小时和模型小时三张表，保留 30 天 |
 | 提示词、远程导入和清理协调状态 | 各自领域 Repository | Application Database |

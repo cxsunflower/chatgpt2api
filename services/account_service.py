@@ -1038,6 +1038,13 @@ class AccountService:
             normalized["image_quota_unknown"] = False
         normalized["limits_progress"] = limits_progress
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
+        normalized["available_models"] = [
+            str(item or "").strip()
+            for item in normalized.get("available_models") or []
+            if str(item or "").strip()
+        ]
+        normalized["models_synced_at"] = normalized.get("models_synced_at") or None
+        normalized["models_sync_error"] = normalized.get("models_sync_error") or None
         if derived_restore_at and not normalized.get("restore_at"):
             normalized["restore_at"] = derived_restore_at
         normalized["restore_at"] = normalized.get("restore_at") or None
@@ -1998,6 +2005,7 @@ class AccountService:
             plan_types: set[str] | tuple[str, ...] | None = None,
             excluded_tokens: set[str] | None = None,
             deadline_monotonic: float | None = None,
+            model: str | None = None,
     ) -> str:
         """从候选池中获取一个可用的图片生图 token。
 
@@ -2072,6 +2080,7 @@ class AccountService:
                     and self._account_matches_plan_type(account or {}, plan_type)
                     and self._account_matches_any_plan_type(account or {}, plan_types)
                     and self._account_matches_source_type(account or {}, source_type)
+                    and self._account_supports_model(account or {}, model)
             ):
                 return str((account or {}).get("access_token") or access_token)
             if str((account or {}).get("status") or "") == "限流":
@@ -2089,7 +2098,11 @@ class AccountService:
             f"no image account available after {len(attempted_tokens)} attempts",
         )
 
-    def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def get_text_access_token(
+        self,
+        excluded_tokens: set[str] | None = None,
+        model: str | None = None,
+    ) -> str:
         self._refresh_accounts_snapshot_if_stale()
         attempted = set(excluded_tokens or set())
         while True:
@@ -2104,6 +2117,7 @@ class AccountService:
                     )
                        and (token := account.get("access_token") or "")
                        and token not in attempted
+                       and self._account_supports_model(account, model)
                 ]
                 if not candidates:
                     return ""
@@ -2114,6 +2128,21 @@ class AccountService:
                 return self.ensure_access_token(access_token, event="get_text_access_token")
             except (TerminalRefreshTokenError, RefreshCredentialsChangedError):
                 continue
+
+    @staticmethod
+    def _account_supports_model(account: dict, model: str | None) -> bool:
+        requested = str(model or "").strip()
+        if not requested or requested == "auto":
+            return True
+        available = account.get("available_models")
+        if not isinstance(available, list) or not available:
+            # Unknown capability keeps the pre-existing scheduler behavior.
+            return True
+        return requested in {
+            str(item or "").strip()
+            for item in available
+            if str(item or "").strip()
+        }
 
     def mark_text_used(self, access_token: str) -> None:
         if not access_token:
@@ -4837,6 +4866,7 @@ class AccountService:
                     if account is not None:
                         synced += 1
                         result_account = account
+                        self.sync_account_models(token)
                         event_status = "success"
                         event_message = "\u8d26\u53f7\u4e0e\u989d\u5ea6\u5df2\u540c\u6b65"
                     else:
@@ -4889,6 +4919,69 @@ class AccountService:
             finalize_progress=finalize_progress,
         )
         return {**result, "refreshed": int(result.get("synced") or 0)}
+
+    def sync_account_models(self, access_token: str) -> list[str]:
+        """Refresh one account's model inventory; failures preserve the last snapshot."""
+        token = str(access_token or "").strip()
+        if not token:
+            return []
+
+    def refresh_all_account_models(self, *, limit: int = 0) -> dict[str, Any]:
+        """Refresh model inventories for a bounded batch of accounts."""
+        tokens = self.list_tokens()
+        selected = tokens[:limit] if limit > 0 else tokens
+        max_workers = account_processing_worker_count(len(selected))
+        synced = 0
+        errors: list[dict[str, Any]] = []
+        if not selected:
+            return {"synced": 0, "errors": errors, "items": self.list_accounts()}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self.sync_account_models, token): token for token in selected}
+            for future in as_completed(futures):
+                token = futures[future]
+                try:
+                    models = future.result()
+                except Exception as exc:
+                    errors.append({
+                        "token": anonymize_token(token),
+                        "error": type(exc).__name__,
+                    })
+                else:
+                    synced += 1 if models else 0
+        return {"synced": synced, "errors": errors, "items": self.list_accounts()}
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            from services.account_processing import account_processing_slot
+            from services.openai_backend_api import OpenAIBackendAPI
+
+            with account_processing_slot():
+                with OpenAIBackendAPI(access_token=token) as backend:
+                    payload = backend.list_models()
+            models = list(dict.fromkeys(
+                str(item.get("id") or "").strip()
+                for item in payload.get("data") or []
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ))
+            self.update_account(
+                token,
+                {
+                    "available_models": models,
+                    "models_synced_at": now,
+                    "models_sync_error": None,
+                },
+                quiet=True,
+            )
+            return models
+        except Exception as exc:
+            self.update_account(
+                token,
+                {
+                    "models_synced_at": now,
+                    "models_sync_error": "models_sync_" + type(exc).__name__,
+                },
+                quiet=True,
+            )
+            return []
 
     def build_export_items(
             self,

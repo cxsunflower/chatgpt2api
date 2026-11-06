@@ -23,9 +23,12 @@ second implementation of service state transitions.
 
 ### Model catalog and image compatibility
 
-`ModelCatalogService` defaults chat models to `gpt-5.6` and `auto` and retains
-explicit configured overrides. The console and `/v1/models` consume the same
-catalog; listing models does not query upstream or append upstream-only entries.
+`ModelCatalogService` defaults chat fallback order to `gpt-6 -> gpt-5.6 -> auto`
+and image fallback order to `gpt-image-2.6 -> gpt-image-2.5 -> gpt-image-2`.
+It merges explicit configuration, account `available_models` snapshots, and the
+fallback chain. `/api/model-catalog` schema 2 also projects sanitized per-account
+models and chain configuration; the console and `/v1/models` consume the same
+catalog. Listing models does not query upstream.
 
 `utils.helper.WEB_IMAGE_MODELS` owns the built-in Web image identifiers:
 `gpt-image-2`, the gpt-image-2.5 aliases, and the
@@ -63,6 +66,7 @@ image model remain unchanged.
 | Image Tasks | `ImageTaskService` | Owner-scoped task projection and terminal result | `data/image_tasks.json` |
 | Image Assets and gallery | `ImageStorageService` | Asset mutation, catalogue, storage, and public URL behavior | Local/WebDAV assets plus `data/image_index.json` |
 | Editable File Tasks and Assets | `EditableFileTaskService` | Owner-scoped task commands and public asset resolution | `EditableFileTaskRepository` plus filesystem assets |
+| Account model capability and fallback | `AccountService`, `ModelCatalogService`, `model_selection_service` | Per-account model snapshots, catalog projection, and ordered chain decisions | Account JSON fields plus existing account repository |
 | Prompt Sources and Prompt Library | `PromptLibraryService` | Revisioned merged library and source health | `PromptLibraryRepository` |
 | CPA/Sub2API imports | `CPAImportService`, `Sub2APIImportService`, `RemoteImportJobCoordinator`, `RemoteAccountImportJob` | One import-job lifecycle and final batch result | Remote-import configuration repository plus Account Repository |
 | Online update | `UpdateStatusService`, `UpdateService` | Availability projection and update-task lifecycle | GitHub Release metadata, managed runtime directory, `data/update_task.json` |

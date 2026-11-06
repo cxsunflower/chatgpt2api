@@ -27,9 +27,22 @@ class ModelCatalogSource(_StrictModel):
     image: ModelCatalogSourceKind
 
 
+class ModelAccountView(_StrictModel):
+    account_id: str = Field(default="")
+    label: str = Field(default="")
+    models: tuple[str, ...] = ()
+    synced_at: str | None = None
+    error: str | None = None
+
+
+class ModelFallbackChains(_StrictModel):
+    chat: tuple[str, ...] = ()
+    image: tuple[str, ...] = ()
+
+
 class ModelCatalogView(_StrictModel):
     object: Literal["model_catalog"] = "model_catalog"
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     generated_at: str = Field(min_length=1)
     revision: str = Field(min_length=1, max_length=64)
     chat_models: tuple[str, ...]
@@ -38,6 +51,8 @@ class ModelCatalogView(_StrictModel):
     defaults: ModelCatalogDefaults
     capabilities: ModelCatalogCapabilities
     source: ModelCatalogSource
+    account_models: tuple[ModelAccountView, ...] = ()
+    fallback_chains: ModelFallbackChains = Field(default_factory=ModelFallbackChains)
     openai_models_endpoint: Literal["/v1/models"] = "/v1/models"
 
     @model_validator(mode="after")

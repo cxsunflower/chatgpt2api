@@ -105,6 +105,7 @@ class AccountOperationRequest(BaseModel):
     account_ids: list[str] = Field(default_factory=list)
     access_tokens: list[str] = Field(default_factory=list)
     selection: AccountSelectionScope | None = None
+    sync_models: bool = True
 
 
 class AccountExportRequest(BaseModel):
@@ -1773,6 +1774,11 @@ def create_router() -> APIRouter:
                     progress_id,
                     finalize_progress=False,
                 )
+                if body.sync_models:
+                    await run_in_threadpool(
+                        account_service.refresh_all_account_models,
+                        limit=0,
+                    )
                 updated_ids, removed_ids = _partition_account_ids(target_ids)
                 result = _account_mutation_payload(
                     synced=max(0, int(raw_result.get("synced") or 0)),

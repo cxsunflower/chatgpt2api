@@ -134,6 +134,12 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
     "unsupported_model": FailurePolicy(
         "request", None, False, 400, "invalid_request_error",
     ),
+    "model_not_found": FailurePolicy(
+        "request", None, False, 400, "invalid_request_error",
+    ),
+    "image_model_not_found": FailurePolicy(
+        "request", None, False, 400, "invalid_request_error",
+    ),
     "image_download_failed": FailurePolicy(
         "delivery", None, False, 502, "server_error",
     ),
@@ -543,11 +549,30 @@ def classify_upstream_http_error(exc: UpstreamHTTPError) -> ImageFailure:
         retry_after=retry_after,
         raw_detail=exc.body,
     )
+    body_text = (
+        exc.body
+        if isinstance(exc.body, str)
+        else json.dumps(exc.body, ensure_ascii=False, default=str)
+        if exc.body is not None
+        else ""
+    )
+    if status_code == 400 and any(
+        marker in body_text.lower()
+        for marker in ("model not found", "model_not_found", "model is not available")
+    ):
+        return image_failure("model_not_found", raw_detail=exc.body)
 
     # The real HTTP status owns the text/failure boundary. Structured fields
     # may refine the reason, but must never turn a non-400 response into text
     # or turn a real 400 response into an account failure.
     if status_code == 400:
+        body_text = (
+            exc.body
+            if isinstance(exc.body, str)
+            else json.dumps(exc.body, ensure_ascii=False, default=str)
+            if exc.body is not None
+            else ""
+        )
         failure = (
             structured_failure
             if structured_failure is not None and structured_failure.status_code == 400

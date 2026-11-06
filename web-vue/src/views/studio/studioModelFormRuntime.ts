@@ -8,7 +8,9 @@ import {
 import { useModelCatalog } from '@/composables/useModelCatalog'
 import {
   getStringPreference,
+  getBooleanPreference,
   preferenceKeys,
+  setBooleanPreference,
   setStringPreference,
 } from '@/lib/preferences'
 import type { StudioImageForm } from '@/components/studio/types'
@@ -17,6 +19,11 @@ export function useStudioModelFormRuntime() {
   const { catalog, chatModels, imageModels, loadModelCatalog } = useModelCatalog()
   const chatModel = ref(getStringPreference(preferenceKeys.studioChatModel, 'auto') || 'auto')
   const chatReasoningEffort = ref(getStringPreference(preferenceKeys.studioChatReasoningEffort, ''))
+  const chatThinkingEnabled = ref<boolean | null>(
+    getBooleanPreference(preferenceKeys.studioChatThinkingFollow, true)
+      ? (chatReasoningEffort.value ? true : null)
+      : false,
+  )
   const imageForm = reactive<StudioImageForm>({
     model: getStringPreference(preferenceKeys.studioImageModel, DEFAULT_IMAGE_MODEL) || DEFAULT_IMAGE_MODEL,
     size: DEFAULT_IMAGE_SIZE,
@@ -40,6 +47,10 @@ export function useStudioModelFormRuntime() {
 
   watch(chatModel, (model) => setStringPreference(preferenceKeys.studioChatModel, model || 'auto'))
   watch(chatReasoningEffort, (effort) => setStringPreference(preferenceKeys.studioChatReasoningEffort, effort || ''))
+  watch(chatThinkingEnabled, (enabled) => {
+    setBooleanPreference(preferenceKeys.studioChatThinkingFollow, enabled !== false)
+    if (enabled === false) chatReasoningEffort.value = ''
+  })
   watch(() => imageForm.model, (model) => {
     setStringPreference(preferenceKeys.studioImageModel, model || DEFAULT_IMAGE_MODEL)
   })
@@ -60,6 +71,7 @@ export function useStudioModelFormRuntime() {
     chatModel,
     chatModelOptions,
     chatReasoningEffort,
+    chatThinkingEnabled,
     imageForm,
     imageModelOptions,
     imageHighResolutionEnabled,

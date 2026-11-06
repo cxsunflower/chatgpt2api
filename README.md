@@ -154,20 +154,23 @@ Authorization: Bearer <auth-key>
 
 | 接口                                | 方法         | 说明                                                 |
 | :---------------------------------- | :----------- | :--------------------------------------------------- |
-| `/v1/models`                        | `GET`        | 返回与控制台一致的模型目录，默认聊天模型为 `gpt-5.6`、`auto` |
+| `/v1/models`                        | `GET`        | 返回与控制台一致的模型目录与账号可用模型 |
 | `/v1/chat/completions`              | `POST`       | 文本、搜索和图片场景的 Chat Completions 入口         |
 | `/v1/responses`                     | `POST`       | 支持文本、搜索和图片工具调用的 Responses 入口        |
 | `/v1/messages`                      | `POST`       | Anthropic Messages 兼容入口                          |
 | `/v1/search`                        | `POST`       | 返回回答、引用来源和搜索结果                         |
 | `/v1/images/generations`            | `POST`       | 图片生成，支持 `n=1..4`                              |
 | `/v1/images/edits`                  | `POST`       | multipart、远程 URL、base64、data URL 和多参考图编辑 |
-| `/v1/editable-file-tasks`           | `GET / POST` | 创建与查询 PPT / PSD 可编辑文件任务                  |
+| `/v1/editable-file-tasks`           | `GET / POST` | 创建与查询 PPT / PSD / 通用文件任务                   |
 | `/v1/editable-file-tasks/{task_id}` | `DELETE`     | 删除当前密钥所属任务                                 |
+| `/v1/editable-file-tasks/{task_id}/recover` | `POST` | 仅 GET 恢复已提交的上游文件任务（不重新生成）        |
 | `/v1/ppt/generations`               | `POST`       | PPT 任务快捷入口                                     |
 | `/v1/psd/generations`               | `POST`       | PSD 任务快捷入口                                     |
 | `/files/{file_path}`                | `GET`        | 公开下载随机存储路径下的生成文件                     |
 
 文件任务的创建、查询和删除按 API Key 隔离；任务返回的 `/files/...` 链接与生成图片一样无需鉴权，持有链接即可下载。公开下载会校验路径及文件类型，拒绝路径穿越。
+
+`gpt-6`、`gpt-5.6` 与 `gpt-image-2.6`、`gpt-image-2.5` 的明确模型不可用错误会沿配置的降级链切换；鉴权、限流、内容拒绝、超时和普通参数错误不会触发模型降级。账号同步会同时读取 `/backend-api/models`，失败保留上次成功快照。
 
 <details>
 <summary>Chat Completions 示例</summary>
@@ -178,6 +181,27 @@ curl http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer <auth-key>" \
   -d '{"model":"gpt-5","messages":[{"role":"user","content":"介绍一下这个项目"}],"stream":true}'
 ```
+
+</details>
+
+<details>
+<summary>原生文件任务示例</summary>
+
+```json
+{
+  "model": "gpt-6",
+  "stream": false,
+  "output_type": "file",
+  "output_filename": "hello.py",
+  "client_task_id": "NEW_TRIGGER_ID",
+  "output_bundle": "separate",
+  "thinking_enabled": true,
+  "reasoning_effort": "medium",
+  "messages": [{"role": "user", "content": "生成真实 hello.py 文件，并返回下载链接"}]
+}
+```
+
+响应中的 `file_task.result.files` 只包含真实文件；普通文本回答不算文件成功。`thinking_enabled=false` 表示不发送思考参数并使用模型默认，不保证模型绝对不推理。
 
 </details>
 

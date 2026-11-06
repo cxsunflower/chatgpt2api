@@ -262,6 +262,11 @@ def create_router(app_version: str) -> APIRouter:
         require_identity(authorization)
         return await run_in_threadpool(get_model_catalog)
 
+    @router.post("/api/model-catalog/sync-accounts")
+    async def sync_model_catalog_accounts(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(account_service.refresh_all_account_models)
+
     @router.get("/api/images", response_model=GalleryPage)
     async def get_images(
         request: Request,

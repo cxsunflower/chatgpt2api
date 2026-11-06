@@ -6,17 +6,24 @@ import json
 from typing import Any
 
 from contracts.models import (
+    ModelAccountView,
     ModelCatalogCapabilities,
     ModelCatalogDefaults,
+    ModelFallbackChains,
     ModelCatalogSource,
     ModelCatalogView,
 )
 from services.account_service import account_service
 from services.config import config
+from services.model_selection_service import (
+    chat_fallback_chain,
+    image_fallback_chain,
+)
 from utils.helper import CODEX_IMAGE_MODEL, WEB_IMAGE_MODELS
 
 
 FALLBACK_CHAT_MODELS = [
+    "gpt-6",
     "gpt-5.6",
     "auto",
 ]
@@ -95,6 +102,54 @@ def _image_models_from_accounts(accounts: list[dict[str, Any]]) -> list[str]:
     return models
 
 
+def _account_models(accounts: list[dict[str, Any]]) -> list[ModelAccountView]:
+    result: list[ModelAccountView] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        account_id = str(
+            account.get("account_id")
+            or account.get("user_id")
+            or account.get("email")
+            or ""
+        ).strip()
+        label = str(account.get("email") or account.get("type") or account_id).strip()
+        result.append(
+            ModelAccountView(
+                account_id=account_id,
+                label=label,
+                models=tuple(
+                    dict.fromkeys(
+                        str(item or "").strip()
+                        for item in account.get("available_models") or []
+                        if str(item or "").strip()
+                    )
+                ),
+                synced_at=account.get("models_synced_at"),
+                error=account.get("models_sync_error"),
+            )
+        )
+    return result
+
+
+def _account_discovered_models(accounts: list[dict[str, Any]], image: bool = False) -> list[str]:
+    values: list[str] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        for model in account.get("available_models") or []:
+            name = str(model or "").strip()
+            if not name:
+                continue
+            if image:
+                if not name.startswith("gpt-image-"):
+                    continue
+            elif name.startswith("gpt-image-"):
+                continue
+            values.append(name)
+    return _unique(values)
+
+
 def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
@@ -118,19 +173,24 @@ class ModelCatalogService:
 
     def view(self) -> ModelCatalogView:
         settings = config.get()
+        accounts = account_service.list_accounts()
         configured_chat_models = _configured_chat_models(settings)
         configured_image_models = _configured_image_models(settings)
+        discovered_chat_models = _account_discovered_models(accounts)
+        discovered_image_models = _account_discovered_models(accounts, image=True)
+        chat_chain = chat_fallback_chain()
+        image_chain = image_fallback_chain()
 
-        chat_source = "config" if configured_chat_models else "fallback"
-        chat_models = _unique(configured_chat_models or list(FALLBACK_CHAT_MODELS))
+        chat_source = "config" if configured_chat_models else ("accounts" if discovered_chat_models else "fallback")
+        chat_models = _unique([*(configured_chat_models or list(FALLBACK_CHAT_MODELS)), *chat_chain, *discovered_chat_models])
 
-        if configured_image_models:
-            image_source = "config"
-            image_models = _unique(configured_image_models)
+        if configured_image_models or discovered_image_models:
+            image_source = "config" if configured_image_models else "accounts"
+            image_models = _unique([*(configured_image_models or []), *image_chain, *discovered_image_models])
         else:
-            account_models = _image_models_from_accounts(account_service.list_accounts())
+            account_models = _image_models_from_accounts(accounts)
             image_source = "accounts" if account_models else "fallback"
-            image_models = _unique(account_models or list(FALLBACK_IMAGE_MODELS))
+            image_models = _unique([*image_chain, *(account_models or list(FALLBACK_IMAGE_MODELS))])
 
         all_models = _unique([*chat_models, *image_models])
         high_resolution_models = [
@@ -153,6 +213,8 @@ class ModelCatalogService:
             "defaults": defaults,
             "capabilities": capabilities,
             "source": source,
+            "account_models": [item.model_dump(mode="json") for item in _account_models(accounts)],
+            "fallback_chains": {"chat": chat_chain, "image": image_chain},
         }
 
         return ModelCatalogView(
@@ -167,6 +229,8 @@ class ModelCatalogService:
                 high_resolution_image_models=tuple(high_resolution_models),
             ),
             source=ModelCatalogSource(**source),
+            account_models=tuple(_account_models(accounts)),
+            fallback_chains=ModelFallbackChains(chat=tuple(chat_chain), image=tuple(image_chain)),
         )
 
 

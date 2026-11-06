@@ -2,7 +2,7 @@ import apiClient from './client'
 
 export interface ModelCatalogResponse {
   object: 'model_catalog'
-  schema_version: 1
+  schema_version: 2
   generated_at: string
   revision: string
   chat_models: string[]
@@ -19,6 +19,17 @@ export interface ModelCatalogResponse {
   source: {
     chat: 'config' | 'accounts' | 'fallback'
     image: 'config' | 'accounts' | 'fallback'
+  }
+  account_models: Array<{
+    account_id: string
+    label: string
+    models: string[]
+    synced_at: string | null
+    error: string | null
+  }>
+  fallback_chains: {
+    chat: string[]
+    image: string[]
   }
   openai_models_endpoint: '/v1/models'
 }

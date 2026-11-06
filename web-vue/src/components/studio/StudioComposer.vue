@@ -303,6 +303,7 @@ const props = defineProps<{
   text: string
   chatModel: string
   chatReasoningEffort: string
+  chatThinkingEnabled: boolean | null
   imageForm: StudioImageForm
   chatModelOptions: string[]
   imageModelOptions: string[]
@@ -319,6 +320,7 @@ const emit = defineEmits<{
   'update:text': [text: string]
   'update:chatModel': [model: string]
   'update:chatReasoningEffort': [effort: string]
+  'update:chatThinkingEnabled': [enabled: boolean | null]
   'update:imageModel': [model: string]
   'update:imageSize': [size: string]
   'update:imageQuality': [quality: string]
@@ -372,6 +374,11 @@ const chatReasoningEffortValue = computed({
     const next = String(Array.isArray(value) ? value[0] : value || 'default')
     emit('update:chatReasoningEffort', next === 'default' ? '' : next)
   },
+})
+
+const chatThinkingEnabledValue = computed({
+  get: () => props.chatThinkingEnabled,
+  set: (value: boolean | null) => emit('update:chatThinkingEnabled', value),
 })
 
 const modeValue = computed({
@@ -442,24 +449,59 @@ const selectedReasoningEffortLabel = computed(() => {
   const current = props.chatReasoningEffort || 'default'
   return chatReasoningEffortOptions.find((option) => option.value === current)?.label || current
 })
+const chatThinkingLabel = computed(() => {
+  if (props.chatThinkingEnabled === false) return '思考已关闭'
+  if (props.chatThinkingEnabled === true) {
+    const effort = selectedReasoningEffortLabel.value
+    return `思考 · ${effort === '默认' ? '中' : effort}`
+  }
+  return '思考跟随模型'
+})
 const chatSettingsLabel = computed(() => {
   const model = compactModelLabel(props.chatModel)
-  const reasoning = selectedReasoningEffortLabel.value
-  return reasoning === '默认' ? model : `${model} ${reasoning}`
+  return `${model} · ${chatThinkingLabel.value}`
 })
 const chatSettingsMenuItems = computed<ComposerMenuItem[]>(() => [
   {
-    key: 'reasoning-heading',
-    label: '推理',
+    key: 'thinking-heading',
+    label: '思考',
     heading: true,
+  },
+  {
+    key: 'thinking:follow',
+    label: '跟随模型默认',
+    active: props.chatThinkingEnabled === null,
+  },
+  {
+    key: 'thinking:on',
+    label: '开启思考',
+    active: props.chatThinkingEnabled === true,
+  },
+  {
+    key: 'thinking:off',
+    label: '关闭思考',
+    active: props.chatThinkingEnabled === false,
+  },
+  {
+    key: 'reasoning-heading',
+    label: '思考档位',
+    heading: true,
+    dividerBefore: true,
   },
   ...chatReasoningEffortOptions
     .filter((option) => option.value !== 'default')
     .map((option) => ({
       key: `reasoning:${option.value}`,
       label: option.label,
+      disabled: props.chatThinkingEnabled === false,
       active: (props.chatReasoningEffort || 'default') === option.value,
     })),
+  {
+    key: 'reasoning:default',
+    label: '跟随模型默认',
+    disabled: props.chatThinkingEnabled === false,
+    active: (props.chatReasoningEffort || 'default') === 'default',
+  },
   {
     key: 'model-menu',
     label: selectedChatModelLabel.value,
@@ -539,7 +581,16 @@ function handleAttachReferenceClick() {
 
 function handleChatSettingsMenuSelect(key: string) {
   closeFloatingMenus()
-  if (key.startsWith('reasoning:')) {
+  if (key === 'thinking:follow') {
+    chatThinkingEnabledValue.value = null
+  } else if (key === 'thinking:on') {
+    chatThinkingEnabledValue.value = true
+    if (!chatReasoningEffortValue.value || chatReasoningEffortValue.value === 'default') {
+      chatReasoningEffortValue.value = 'medium'
+    }
+  } else if (key === 'thinking:off') {
+    chatThinkingEnabledValue.value = false
+  } else if (key.startsWith('reasoning:')) {
     chatReasoningEffortValue.value = key.slice('reasoning:'.length)
   } else if (key.startsWith('model:')) {
     chatModelValue.value = key.slice('model:'.length)
