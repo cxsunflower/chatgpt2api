@@ -1,6 +1,6 @@
 # 0004: GIF request controls and verified animated delivery
 
-Status: implementing
+Status: pending-verification
 
 - Created: 2026-11-06
 - Owner: image protocol, ImageTaskService, ModelCatalogService, Studio composer
@@ -47,10 +47,10 @@ not an automatic retry after a consumed image generation.
 - [x] Studio exposes format/frame controls and consumes allowed models from the
   catalog; switching away from GIF does not send stale frame hints.
 - [x] Desktop/mobile controls are usable and no page-level overflow is added.
-- [ ] Real animated output is verified by decoded frames and distinct content;
+- [x] Real animated output is verified by decoded frames and distinct content;
   bot delivery requires actual platform receipts. Record the generation method.
 - [x] Static-output failures remain explicit and do not trigger paid replay.
-- [ ] Documentation, production build, deployment and rollback evidence agree.
+- [x] Documentation, production build, deployment and rollback evidence agree.
 
 ## Verification and rollback
 
@@ -62,11 +62,18 @@ source backups. Restoring the previous image/source does not overwrite user data
 ## Unresolved
 
 The native image upstream has not produced a real animation in current samples.
-Verify a viable generation path before declaring GIF delivery complete.
+The native Python file path has passed real QQ delivery. User visual acceptance
+and animation fidelity beyond the observed samples remain unverified.
 
-Agent checks: 42 focused Python cases, image/file frontend runtime cases,
+Agent checks: 47 focused Python cases, image/file frontend runtime cases,
 production frontend build, eight-route desktop smoke and 390px Studio checks.
-Bot candidate: 52 SDK compatibility checks plus 13 GIF worker checks. Full Python
+Bot candidate: 52 SDK compatibility checks plus 17 GIF worker checks. Full Python
 collection is blocked by five existing tests requiring absent fixture paths or
 `PRODUCTION_PORT_ISOLATED_ROOT`; the temporary UI application copy is excluded.
-Production deployment and QQ delivery are pending. User acceptance is separate.
+Production backend and bridge are deployed with immutable image and source backups.
+An initial tool-limit failure exposed mixed timestamp string ordering in the file
+account scheduler; parsing UTC instants restored least-recently-used selection.
+A new authorized QQ test produced a 320x240 GIF with 12 frames (7 distinct decoded
+frames), 1800ms duration and 14473 bytes through native Python. Platform receipts
+and GET readback succeeded; downloaded QQ bytes exactly matched the backend SHA256.
+Earlier failed tasks were retained without replay. User acceptance is separate.
