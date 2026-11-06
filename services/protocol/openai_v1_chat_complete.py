@@ -138,39 +138,49 @@ def stream_text_chat_completion(
     model: str,
     thinking_effort: str = "",
 ) -> Iterator[dict[str, Any]]:
-    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
-    created = int(time.time())
-    for selected_model in model_chain(model):
-        sent_role = False
-        request = ConversationRequest(
-            model=selected_model,
-            messages=messages,
-            thinking_effort=thinking_effort,
-        )
-        try:
-            for delta_text in stream_text_deltas(backend, request):
-                if not sent_role:
-                    sent_role = True
-                    yield _with_log_metadata(
-                        completion_chunk(selected_model, {"role": "assistant", "content": delta_text}, None, completion_id, created),
-                        _backend_account_email(backend),
-                    )
-                else:
-                    yield _with_log_metadata(
-                        completion_chunk(selected_model, {"content": delta_text}, None, completion_id, created),
-                        _backend_account_email(backend),
-                    )
-        except Exception as exc:
-            if not sent_role and model_unavailable_from_error(exc):
-                continue
-            raise
-        if not sent_role:
-            yield _with_log_metadata(
-                completion_chunk(selected_model, {"role": "assistant", "content": ""}, None, completion_id, created),
-                _backend_account_email(backend),
+    try:
+        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        last_error: Exception | None = None
+        for index, selected_model in enumerate(model_chain(model)):
+            if index:
+                backend.close()
+                backend = text_backend(selected_model)
+            sent_role = False
+            request = ConversationRequest(
+                model=selected_model,
+                messages=messages,
+                thinking_effort=thinking_effort,
             )
-        yield _with_log_metadata(completion_chunk(selected_model, {}, "stop", completion_id, created), _backend_account_email(backend))
-        return
+            try:
+                for delta_text in stream_text_deltas(backend, request):
+                    if not sent_role:
+                        sent_role = True
+                        yield _with_log_metadata(
+                            completion_chunk(selected_model, {"role": "assistant", "content": delta_text}, None, completion_id, created),
+                            _backend_account_email(backend),
+                        )
+                    else:
+                        yield _with_log_metadata(
+                            completion_chunk(selected_model, {"content": delta_text}, None, completion_id, created),
+                            _backend_account_email(backend),
+                        )
+            except Exception as exc:
+                last_error = exc
+                if not sent_role and model_unavailable_from_error(exc):
+                    continue
+                raise
+            if not sent_role:
+                yield _with_log_metadata(
+                    completion_chunk(selected_model, {"role": "assistant", "content": ""}, None, completion_id, created),
+                    _backend_account_email(backend),
+                )
+            yield _with_log_metadata(completion_chunk(selected_model, {}, "stop", completion_id, created), _backend_account_email(backend))
+            return
+        if last_error is not None:
+            raise last_error
+    finally:
+        backend.close()
 
 
 def collect_chat_content(chunks: Iterable[dict[str, Any]]) -> str:
@@ -418,6 +428,8 @@ def text_completion_response(model: str, messages: list[dict[str, Any]], thinkin
             if model_unavailable_from_error(exc):
                 continue
             raise
+        finally:
+            backend.close()
     if last_error is not None:
         raise last_error
     raise HTTPException(status_code=503, detail={"error": "no fallback model available"})

@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from collections.abc import Callable
@@ -1501,7 +1502,9 @@ class OpenAIBackendAPI:
             if not conv_id:
                 continue
             # 检查时间范围：对话的 updated_at 应该在请求开始时间之后（或附近）
-            updated_at = float(item.get("update_time") or item.get("updated_at") or 0)
+            updated_at = self._conversation_timestamp(
+                item.get("update_time") or item.get("updated_at")
+            )
             if updated_at and started_at and (updated_at < started_at - 30 or updated_at > started_at + 600):
                 continue
             # 匹配 prompt 关键词
@@ -1529,6 +1532,22 @@ class OpenAIBackendAPI:
             })
             return best_match
         return ""
+
+    @staticmethod
+    def _conversation_timestamp(value: object) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return 0.0
 
     @staticmethod
     def _editable_prompt(fixed_prompt: str, user_prompt_text: str) -> str:
@@ -1662,8 +1681,17 @@ class OpenAIBackendAPI:
                 files=downloaded,
                 text=final_text,
             )
-        except UpstreamHTTPError as exc:
-            self._raise_editable_http_failure(exc, "native_file_export_http_failure")
+        except Exception as exc:
+            conversation_id = conversation_id or str(getattr(exc, "conversation_id", "") or "")
+            if isinstance(exc, UpstreamHTTPError):
+                try:
+                    self._raise_editable_http_failure(exc, "native_file_export_http_failure")
+                except EditableFileFailureError as failure:
+                    failure.conversation_id = conversation_id
+                    raise failure from exc
+            if conversation_id:
+                setattr(exc, "conversation_id", conversation_id)
+            raise
 
     def _upload_native_file(self, item: dict[str, Any], *, deadline: float | None = None) -> Dict[str, Any]:
         data = item["data"]
@@ -1867,18 +1895,38 @@ class OpenAIBackendAPI:
                 last_error = exc
             if download_url:
                 break
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline is None or time.monotonic() >= deadline:
                 raise last_error or NativeFileError("download_url_missing")
             time.sleep(min(1.0, max(0.1, (deadline or time.monotonic() + 1) - time.monotonic())))
+        download_url = signed_asset_url(download_url)
+        parsed_url = urlparse(download_url)
+        same_origin = (
+            parsed_url.scheme == urlparse(self.base_url).scheme
+            and parsed_url.hostname == urlparse(self.base_url).hostname
+            and (parsed_url.port or 443) == (urlparse(self.base_url).port or 443)
+        )
         response = self.session.get(
             download_url,
-            headers=self._signed_asset_headers(),
+            headers=self._headers(parsed_url.path) if same_origin else self._signed_asset_headers(),
             allow_redirects=False,
             timeout=self._editable_request_timeout(deadline, 300),
+            stream=True,
         )
-        if not 200 <= response.status_code < 300:
-            raise NativeFileError("download_http_" + str(response.status_code))
-        data = bytes(response.content or b"")
+        try:
+            if not 200 <= response.status_code < 300:
+                raise NativeFileError("download_http_" + str(response.status_code))
+            length = response.headers.get("Content-Length", "")
+            if str(length).isdigit() and int(length) > MAX_FILE_BYTES:
+                raise NativeFileError("empty_or_oversize_output")
+            buffer = bytearray()
+            for chunk in response.iter_content(chunk_size=65536):
+                self._editable_request_timeout(deadline, 300)
+                if len(buffer) + len(chunk) > MAX_FILE_BYTES:
+                    raise NativeFileError("empty_or_oversize_output")
+                buffer.extend(chunk)
+            data = bytes(buffer)
+        finally:
+            response.close()
         name = self._sanitize_editable_filename(artifact.name) or self._sanitize_editable_filename(Path(artifact.sandbox_path).name)
         if not name:
             name = self._sanitize_editable_filename(Path(urlparse(download_url).path).name) or "artifact.bin"

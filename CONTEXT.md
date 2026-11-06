@@ -53,11 +53,11 @@ A generated or edited image exposed by URL or base64 data and optionally indexed
 _Avoid_: Image task
 
 **Editable File Task**:
-An owner-scoped asynchronous PPT or PSD generation request whose terminal result exposes a primary editable file and a ZIP archive.
+An owner-scoped asynchronous PPT, PSD, or generic native-file generation request. Its terminal result exposes validated files and optional ZIP packaging. A chat file request requires actual artifacts; assistant text alone is not success.
 _Avoid_: Image task, chat attachment
 
 **Editable File Asset**:
-A published PPT, PSD, or ZIP file exposed by an unguessable public URL after an Editable File Task finishes exporting both artifacts.
+A validated generated file exposed by an unguessable public URL after an Editable File Task publishes its outputs.
 _Avoid_: Editable file task, task record
 
 ### Observability and routing

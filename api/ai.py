@@ -17,6 +17,7 @@ from services.editable_file_task_service import (
     editable_file_task_service,
 )
 from services.log_service import LoggedCall
+from services.protocol.reasoning import thinking_control_from_body
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
@@ -225,7 +226,7 @@ def create_router() -> APIRouter:
                 prompt=prompt,
                 model=model,
                 transport="chat",
-                thinking_effort=str(payload.get("thinking_effort") or payload.get("reasoning_effort") or ""),
+                thinking_effort=thinking_control_from_body(payload)[1],
                 output_bundle=str(payload.get("output_bundle") or "zip"),
                 output_filename=str(payload.get("output_filename") or "result.txt"),
                 input_files=original_files,

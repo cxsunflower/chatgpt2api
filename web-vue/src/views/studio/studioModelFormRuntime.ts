@@ -18,7 +18,11 @@ import type { StudioImageForm } from '@/components/studio/types'
 export function useStudioModelFormRuntime() {
   const { catalog, chatModels, imageModels, loadModelCatalog } = useModelCatalog()
   const chatModel = ref(getStringPreference(preferenceKeys.studioChatModel, 'auto') || 'auto')
-  const chatReasoningEffort = ref(getStringPreference(preferenceKeys.studioChatReasoningEffort, ''))
+  const savedEffort = getStringPreference(preferenceKeys.studioChatReasoningEffort, '')
+  const chatReasoningEffort = ref(
+    ['high', 'xhigh', 'extended'].includes(savedEffort) ? 'extended'
+      : ['low', 'minimal', 'medium', 'standard'].includes(savedEffort) ? 'standard' : '',
+  )
   const chatThinkingEnabled = ref<boolean | null>(
     getBooleanPreference(preferenceKeys.studioChatThinkingFollow, true)
       ? (chatReasoningEffort.value ? true : null)
@@ -49,7 +53,8 @@ export function useStudioModelFormRuntime() {
   watch(chatReasoningEffort, (effort) => setStringPreference(preferenceKeys.studioChatReasoningEffort, effort || ''))
   watch(chatThinkingEnabled, (enabled) => {
     setBooleanPreference(preferenceKeys.studioChatThinkingFollow, enabled !== false)
-    if (enabled === false) chatReasoningEffort.value = ''
+    if (enabled !== true) chatReasoningEffort.value = ''
+    else if (!chatReasoningEffort.value) chatReasoningEffort.value = 'standard'
   })
   watch(() => imageForm.model, (model) => {
     setStringPreference(preferenceKeys.studioImageModel, model || DEFAULT_IMAGE_MODEL)

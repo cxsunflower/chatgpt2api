@@ -5,6 +5,9 @@ seed_root=/opt/chatgpt2api
 runtime_root=/app
 marker_name=.chatgpt2api-image-version
 seed_version="$(tr -d '\r\n' < "${seed_root}/VERSION")"
+if [ -s "${seed_root}/.image-revision" ]; then
+  seed_version="${seed_version}:$(tr -d '\r\n' < "${seed_root}/.image-revision")"
+fi
 installed_image_version=""
 
 if [ -f "${runtime_root}/${marker_name}" ]; then

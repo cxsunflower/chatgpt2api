@@ -2125,8 +2125,12 @@ class AccountService:
                     )
                        and (token := account.get("access_token") or "")
                        and token not in attempted
-                       and self._account_supports_model(account, model)
                 ]
+                supported = [
+                    token for token in candidates
+                    if self._account_supports_model(self._accounts[token], model)
+                ]
+                candidates = supported or candidates
                 if not candidates:
                     return ""
                 access_token = candidates[self._index % len(candidates)]
@@ -2141,6 +2145,8 @@ class AccountService:
     def _account_supports_model(account: dict, model: str | None) -> bool:
         requested = str(model or "").strip()
         if not requested or requested == "auto":
+            return True
+        if "gpt-image-" in requested:
             return True
         available = account.get("available_models")
         if not isinstance(available, list) or not available:

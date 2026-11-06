@@ -618,6 +618,13 @@ def format_image_result(
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
         image_bytes = base64.b64decode(b64_json)
+        if normalized_output_format == "gif":
+            with Image.open(io.BytesIO(image_bytes)) as animated:
+                if animated.format != "GIF" or getattr(animated, "n_frames", 1) < 2:
+                    raise ImageGenerationError(
+                        "upstream_did_not_return_animated_gif",
+                        failure=image_failure("image_output_format_mismatch"),
+                    )
         if normalized_output_format:
             image_bytes = convert_image_bytes(image_bytes, normalized_output_format)
         if normalized_output_format != "gif":
@@ -1315,6 +1322,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             attempted_tokens.add(token)
         account_snapshot = account_service.get_account(token) or {}
         active_backend: OpenAIBackendAPI | None = None
+        file_conversation_id = ""
         try:
             _remember_text_account(backend, token)
             active_backend = OpenAIBackendAPI(access_token=token)
@@ -1374,6 +1382,8 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             account_service.mark_text_used(token)
             return
         except Exception as exc:
+            if file_mode and file_conversation_id:
+                setattr(exc, "conversation_id", file_conversation_id)
             auth_failure = bool(token and _is_account_auth_failure(exc))
             if auth_failure:
                 try:
@@ -2923,7 +2933,7 @@ def _generate_single_image(
                 False,
                 failure=failure,
                 error=image_error,
-                quota_consumed=(failure.code == "image_download_failed"),
+                quota_consumed=(failure.code in {"image_download_failed", "image_output_format_mismatch"}),
             )
             attach_attempts(image_error)
             if retry_with_different_account(failure, image_error):

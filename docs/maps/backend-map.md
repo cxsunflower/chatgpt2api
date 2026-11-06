@@ -30,6 +30,17 @@ fallback chain. `/api/model-catalog` schema 2 also projects sanitized per-accoun
 models and chain configuration; the console and `/v1/models` consume the same
 catalog. Listing models does not query upstream.
 
+`AccountService` uses observed chat inventories when a selectable account supports
+the request. If none does, upstream decides availability so explicit model fallback
+can run. Image requests do not use the chat inventory filter.
+
+`protocol.reasoning` maps compatible effort aliases to `standard` or `extended`.
+Both chat text and chat file routes honor `thinking_enabled=false` by omitting
+upstream effort. `EditableFileTaskService` owns file fallback before conversation
+acceptance; recovery reserves the owner-scoped task and uses its original account
+for GET-only downloads. Same-origin native downloads require upstream credentials;
+external signed asset downloads never receive those credentials.
+
 `utils.helper.WEB_IMAGE_MODELS` owns the built-in Web image identifiers:
 `gpt-image-2`, the gpt-image-2.5 aliases, and the
 `gpt-image-2.6`, `gpt-image-2.6-flare`, and `gpt-image-2.6-sunburst` aliases.
@@ -46,6 +57,9 @@ Image requests carry optional `output_format`, `frame_count`, and
 raster upscaling/re-encoding and are stored with `.gif` and `image/gif`; the
 other explicit formats are converted locally before storage. Existing `n` and
 multi-image behavior is unchanged.
+
+GIF success requires an actual GIF with at least two frames. Static output raises
+`image_output_format_mismatch` and does not switch accounts or regenerate.
 
 The 2.5 identifiers use the existing `auto` upstream Web model slug. They are
 compatibility names and do not force a particular official API image engine or

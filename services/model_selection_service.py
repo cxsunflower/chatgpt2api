@@ -78,6 +78,8 @@ def model_unavailable_text(error: Exception) -> bool:
 
 
 def model_unavailable_from_error(error: Exception) -> bool:
+    if getattr(error, "conversation_id", ""):
+        return False
     for attr in ("failure", "code", "stage"):
         value = getattr(error, attr, None)
         if attr == "failure" and value is not None:

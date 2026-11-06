@@ -196,12 +196,16 @@ curl http://localhost:3000/v1/chat/completions \
   "client_task_id": "NEW_TRIGGER_ID",
   "output_bundle": "separate",
   "thinking_enabled": true,
-  "reasoning_effort": "medium",
+  "reasoning_effort": "standard",
   "messages": [{"role": "user", "content": "生成真实 hello.py 文件，并返回下载链接"}]
 }
 ```
 
 响应中的 `file_task.result.files` 只包含真实文件；普通文本回答不算文件成功。`thinking_enabled=false` 表示不发送思考参数并使用模型默认，不保证模型绝对不推理。
+
+思考档位使用 `standard`（标准）和 `extended`（深度）；兼容接口的 `low/minimal/medium` 映射到标准档，`high/xhigh` 映射到深度档。文件任务收到会话 ID 后不再自动更换模型；下载失败可按原任务 ID 恢复，恢复使用原账号，且不会重新生成。
+
+GIF 请求必须收到真正的多帧 GIF 才能成功。上游若返回静态图，接口明确返回 `image_output_format_mismatch`，不会改扩展名冒充动图，也不会因此换账号再次生成。
 
 </details>
 

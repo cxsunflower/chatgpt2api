@@ -63,6 +63,8 @@ COPY scripts ./scripts
 COPY --from=image-upscale-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=image-upscale-build /app/scripts/image_upscale/node_modules ./scripts/image_upscale/node_modules
 COPY --from=web-build /app/web-vue/dist ./web_dist
+RUN find . -type f ! -name '.image-revision' ! -path './.venv/*' ! -path '*/node_modules/*' -print0 \
+    | sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f 1 > .image-revision
 COPY deploy/docker-entrypoint.sh /usr/local/bin/chatgpt2api-entrypoint
 RUN chmod 0755 /usr/local/bin/chatgpt2api-entrypoint
 

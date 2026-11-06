@@ -4,12 +4,13 @@ from typing import Any
 
 
 def normalize_thinking_effort(value: object) -> str:
+    """将兼容接口档位映射为已验证的上游档位。"""
     normalized = str(value or "").strip().lower()
     if normalized in {"", "none"}:
         return ""
-    if normalized in {"low", "medium", "high"}:
-        return normalized
-    if normalized in {"xhigh", "extended"}:
+    if normalized in {"low", "minimal", "standard", "medium"}:
+        return "standard"
+    if normalized in {"high", "xhigh", "extended"}:
         return "extended"
     return ""
 
@@ -39,5 +40,5 @@ def thinking_control_from_body(body: dict[str, Any]) -> tuple[bool | None, str]:
     if enabled is False:
         return False, ""
     if enabled is True and not effort:
-        effort = "medium"
+        effort = "standard"
     return enabled, effort

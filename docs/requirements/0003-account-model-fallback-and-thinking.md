@@ -52,5 +52,9 @@ from `/v1/models` fallback names.
   thinking follow/on/off, sandbox-link cleanup, quote repair, and catalog
   schema 2.
 - [x] Frontend production TypeScript/Vite build succeeds.
-- [ ] Server deployment, account model sync against real upstream accounts,
-  real model fallback, and natural QQ delivery remain to be verified.
+- [x] Isolated real HTTP file generation with and without input files, thinking
+  on/off, repeated client task IDs, and downloaded-byte verification.
+- [x] Contract checks cover model fallback exhaustion, accepted-conversation
+  boundaries, original-account recovery, and authenticated download isolation.
+- [ ] Production deployment and QQ delivery of the revised implementation,
+  real model fallback, and user acceptance remain to be verified.

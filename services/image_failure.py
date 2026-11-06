@@ -39,7 +39,7 @@ class ImageFailure:
 
     @property
     def switch_account(self) -> bool:
-        return self.outcome == "failure"
+        return self.outcome == "failure" and self.code != "image_output_format_mismatch"
 
     @property
     def account_failure(self) -> bool:
@@ -141,6 +141,9 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
         "request", None, False, 400, "invalid_request_error",
     ),
     "image_download_failed": FailurePolicy(
+        "delivery", None, False, 502, "server_error",
+    ),
+    "image_output_format_mismatch": FailurePolicy(
         "delivery", None, False, 502, "server_error",
     ),
     "task_interrupted": FailurePolicy(
@@ -336,6 +339,8 @@ def public_image_error_message(
     failure: ImageFailure,
     error: BaseException | None = None,
 ) -> str:
+    if failure.code == "image_output_format_mismatch":
+        return "上游未返回真正的多帧 GIF，本次未交付动图。"
     if failure.code == "image_poll_timeout":
         return IMAGE_TIMEOUT_PUBLIC_MESSAGE
     if failure.code in {"image_stream_interrupted", "image_stream_timeout"}:

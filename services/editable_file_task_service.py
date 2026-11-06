@@ -24,6 +24,7 @@ from services.config import DATA_DIR
 from services.content_filter import request_text
 from services.editable_file_failure import EditableFileFailureError
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.model_selection_service import model_chain, model_unavailable_from_error
 from services.native_file_support import (
     MAX_FILES,
     MAX_TOTAL_BYTES,
@@ -142,18 +143,21 @@ def _file_url(path: Path, base_url: str) -> str:
     return f"{prefix}/files/{quote(rel, safe='/')}" if prefix else f"/files/{quote(rel, safe='/')}"
 
 
-def _editable_access_token() -> str:
+def _editable_access_token(model: str = "", *, account_email: str = "", chat_file: bool = False) -> str:
     attempted_tokens: set[str] = set()
     while True:
         accounts = [
             item for item in account_service.list_accounts()
             if (token := _clean(item.get("access_token")))
                and token not in attempted_tokens
-               and account_service._is_account_selectable(item, allow_limited=True)
-               and account_service._account_matches_any_plan_type(item, EDITABLE_FILE_PLAN_TYPES)
+               and account_service._is_account_selectable(item, allow_limited=True, allow_image_pending=chat_file)
+               and (chat_file or account_service._account_matches_any_plan_type(item, EDITABLE_FILE_PLAN_TYPES))
+               and (not account_email or _clean(item.get("email")) == account_email)
         ]
         if not accounts:
-            raise RuntimeError("no available plus/team/pro account")
+            raise RuntimeError("no available file generation account")
+        supported = [item for item in accounts if account_service._account_supports_model(item, model)]
+        accounts = supported or accounts
         accounts.sort(key=lambda item: _clean(item.get("last_used_at")))
         token = _clean(accounts[0].get("access_token"))
         attempted_tokens.add(token)
@@ -419,9 +423,6 @@ class EditableFileTaskService:
         try:
             if kind == "psd" and not base64_images:
                 raise ValueError("base64_images is empty")
-            token = _editable_access_token()
-            account = account_service.get_account(token) or {}
-            account_email = _clean(account.get("email"))
             with self._lock:
                 owner_id, task_id = key.rsplit(":", 1)
                 stored_task = self._repository.get(owner_id, task_id) or {}
@@ -430,26 +431,37 @@ class EditableFileTaskService:
             staging_dir = self._staging_dir(stored_task)
             if staging_dir.exists():
                 shutil.rmtree(staging_dir)
-            with OpenAIBackendAPI(token) as backend:
-                if kind == "file":
-                    result = backend.export_file(
-                        prompt,
-                        staging_dir,
-                        model=stored_task["model"],
-                        output_filename=stored_task.get("output_filename") or "result.txt",
-                        input_files=input_files or [],
-                        timeout_secs=EDITABLE_FILE_TIMEOUT_SECS,
-                        transport=transport,
-                        thinking_effort=thinking_effort,
-                    )
-                else:
-                    export = backend.export_psd_zip if kind == "psd" else backend.export_ppt_zip
-                    result = export(
-                        base64_images,
-                        prompt,
-                        staging_dir,
-                        timeout_secs=EDITABLE_FILE_TIMEOUT_SECS,
-                    )
+            models = [m for m in model_chain(stored_task["model"]) if m != "auto"] if kind == "file" else [stored_task["model"]]
+            deadline = time.monotonic() + EDITABLE_FILE_TIMEOUT_SECS
+            for index, selected_model in enumerate(models):
+                token = _editable_access_token(selected_model, chat_file=kind == "file" and transport == "chat")
+                account = account_service.get_account(token) or {}
+                account_email = _clean(account.get("email"))
+                stored_task["model"] = selected_model
+                self._update_task(key, model=selected_model, account_email=account_email)
+                try:
+                    with OpenAIBackendAPI(token) as backend:
+                        if kind == "file":
+                            result = backend.export_file(
+                                prompt,
+                                staging_dir,
+                                model=selected_model,
+                                output_filename=stored_task.get("output_filename") or "result.txt",
+                                input_files=input_files or [],
+                                timeout_secs=max(0.001, deadline - time.monotonic()),
+                                transport=transport,
+                                thinking_effort=thinking_effort,
+                            )
+                        else:
+                            export = backend.export_psd_zip if kind == "psd" else backend.export_ppt_zip
+                            result = export(base64_images, prompt, staging_dir, timeout_secs=EDITABLE_FILE_TIMEOUT_SECS)
+                    break
+                except Exception as exc:
+                    if (kind == "file" and index + 1 < len(models)
+                            and not getattr(exc, "conversation_id", "")
+                            and time.monotonic() < deadline and model_unavailable_from_error(exc)):
+                        continue
+                    raise
             account_service.mark_text_used(token)
             if kind == "file":
                 if not getattr(result, "files", []):
@@ -667,22 +679,25 @@ class EditableFileTaskService:
         """GET-only recovery for a previously failed native file publication."""
         owner = _owner_id(identity)
         normalized_task_id = _clean(task_id)
+        key = _task_key(owner, normalized_task_id)
         with self._lock:
             task = self._repository.get(owner, normalized_task_id)
-        if task is None or task.get("kind") != "file":
-            return None
-        result = task.get("result") if isinstance(task.get("result"), dict) else {}
-        conversation_id = _clean(result.get("conversation_id"))
-        if not conversation_id or task.get("status") == TASK_STATUS_SUCCESS:
-            return None
+            if task is None or task.get("kind") != "file" or task.get("status") != TASK_STATUS_ERROR or task.get("delete_pending"):
+                return None
+            result = task.get("result") if isinstance(task.get("result"), dict) else {}
+            conversation_id = _clean(result.get("conversation_id"))
+            account_email = _clean(task.get("account_email"))
+            if not conversation_id or not account_email:
+                return None
+            self._update_task(key, status=TASK_STATUS_RUNNING)
         model = _clean(task.get("model")) or EDITABLE_FILE_MODEL
         output_filename = _clean(task.get("output_filename")) or "result.txt"
         staging_dir = self._staging_dir(task)
         started_at = time.time()
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir)
         try:
-            token = _editable_access_token()
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+            token = _editable_access_token(model, account_email=account_email, chat_file=True)
             with OpenAIBackendAPI(token) as backend:
                 exported = backend.recover_file(
                     conversation_id,
@@ -697,7 +712,7 @@ class EditableFileTaskService:
                 output_bundle=output_bundle,
             )
             self._update_task(
-                normalized_task_id,
+                key,
                 status=TASK_STATUS_SUCCESS,
                 result=data,
                 error="",
@@ -719,6 +734,7 @@ class EditableFileTaskService:
             )
         except Exception:
             self._remove_directories([staging_dir])
+            self._update_task(key, status=TASK_STATUS_ERROR)
             raise
 
     def _publish_files(

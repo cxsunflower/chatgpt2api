@@ -412,10 +412,8 @@ const chatModelSelectOptions = computed(() => props.chatModelOptions.map((model)
 
 const chatReasoningEffortOptions = [
   { label: '默认', value: 'default' },
-  { label: '低', value: 'low' },
-  { label: '中', value: 'medium' },
-  { label: '高', value: 'high' },
-  { label: '超高', value: 'extended' },
+  { label: '标准', value: 'standard' },
+  { label: '深度', value: 'extended' },
 ]
 
 const imageModelSelectOptions = computed(() => props.imageModelOptions.map((model) => ({
@@ -453,7 +451,7 @@ const chatThinkingLabel = computed(() => {
   if (props.chatThinkingEnabled === false) return '思考已关闭'
   if (props.chatThinkingEnabled === true) {
     const effort = selectedReasoningEffortLabel.value
-    return `思考 · ${effort === '默认' ? '中' : effort}`
+    return `思考 · ${effort === '默认' ? '标准' : effort}`
   }
   return '思考跟随模型'
 })
@@ -582,16 +580,18 @@ function handleAttachReferenceClick() {
 function handleChatSettingsMenuSelect(key: string) {
   closeFloatingMenus()
   if (key === 'thinking:follow') {
+    chatReasoningEffortValue.value = 'default'
     chatThinkingEnabledValue.value = null
   } else if (key === 'thinking:on') {
     chatThinkingEnabledValue.value = true
     if (!chatReasoningEffortValue.value || chatReasoningEffortValue.value === 'default') {
-      chatReasoningEffortValue.value = 'medium'
+      chatReasoningEffortValue.value = 'standard'
     }
   } else if (key === 'thinking:off') {
     chatThinkingEnabledValue.value = false
   } else if (key.startsWith('reasoning:')) {
     chatReasoningEffortValue.value = key.slice('reasoning:'.length)
+    chatThinkingEnabledValue.value = key === 'reasoning:default' ? null : true
   } else if (key.startsWith('model:')) {
     chatModelValue.value = key.slice('model:'.length)
   }
