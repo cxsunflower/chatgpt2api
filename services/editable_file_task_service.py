@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -158,7 +159,10 @@ def _editable_access_token(model: str = "", *, account_email: str = "", chat_fil
             raise RuntimeError("no available file generation account")
         supported = [item for item in accounts if account_service._account_supports_model(item, model)]
         accounts = supported or accounts
-        accounts.sort(key=lambda item: _clean(item.get("last_used_at")))
+        # Text and image calls persist different timestamp formats. Compare
+        # instants, otherwise a recent space-separated value sorts before ISO T.
+        accounts.sort(key=lambda item: account_service._parse_time(item.get("last_used_at"))
+                      or datetime.min.replace(tzinfo=timezone.utc))
         token = _clean(accounts[0].get("access_token"))
         attempted_tokens.add(token)
         try:
