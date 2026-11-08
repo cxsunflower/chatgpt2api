@@ -55,6 +55,13 @@ export function useStudioModelFormRuntime() {
   watch(imageGifEnabled, (enabled) => {
     if (!enabled && imageForm.outputFormat === 'gif') imageForm.outputFormat = 'auto'
   })
+  const imageMaxN = computed(() => {
+    const configured = catalog.value?.capabilities.image_max_n
+    return Number.isFinite(Number(configured)) ? Math.max(1, Math.trunc(Number(configured))) : 4
+  })
+  watch(imageMaxN, (maximum) => {
+    if (imageForm.n > maximum) imageForm.n = maximum
+  }, { immediate: true })
 
   watch(chatModel, (model) => setStringPreference(preferenceKeys.studioChatModel, model || 'auto'))
   watch(chatReasoningEffort, (effort) => setStringPreference(preferenceKeys.studioChatReasoningEffort, effort || ''))
@@ -88,6 +95,7 @@ export function useStudioModelFormRuntime() {
     imageModelOptions,
     imageHighResolutionEnabled,
     imageGifEnabled,
+    imageMaxN,
     loadModelCatalog,
   }
 }

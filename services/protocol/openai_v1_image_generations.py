@@ -9,23 +9,24 @@ from services.protocol.conversation import (
     count_text_tokens,
     stream_image_chunks,
     stream_image_outputs_with_pool,
-    validate_gif_request,
+    validate_image_output_request,
 )
 from services.model_selection_service import with_model_fallback
 from utils.image_tokens import count_image_output_items_tokens, image_usage
+from utils.helper import parse_image_count
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     prompt = str(body.get("prompt") or "")
     model = str(body.get("model") or "gpt-image-2")
-    n = int(body.get("n") or 1)
+    n = parse_image_count(body.get("n"))
     size = body.get("size")
     quality = str(body.get("quality") or "auto")
     response_format = str(body.get("response_format") or "b64_json")
     output_format = body.get("output_format")
     frame_count = body.get("frame_count", MISSING_IMAGE_OPTION)
     frame_duration_ms = body.get("frame_duration_ms", MISSING_IMAGE_OPTION)
-    validate_gif_request(model, output_format, stream=bool(body.get("stream")))
+    validate_image_output_request(model, output_format, stream=bool(body.get("stream")))
     base_url = str(body.get("base_url") or "") or None
     progress_callback = body.get("progress_callback")
     outputs = with_model_fallback(

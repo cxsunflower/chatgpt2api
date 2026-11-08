@@ -22,7 +22,7 @@ from services.protocol.conversation import (
     stream_image_outputs_with_pool,
     stream_text_deltas,
     text_backend,
-    validate_gif_request,
+    validate_image_output_request,
 )
 from services.protocol.reasoning import thinking_control_from_body, thinking_effort_from_body
 from services.model_selection_service import (
@@ -218,7 +218,12 @@ def chat_image_args(body: dict[str, Any]) -> tuple[str, str, int, list[tuple[byt
     output_format = body.get("output_format")
     frame_count = body.get("frame_count", MISSING_IMAGE_OPTION)
     frame_duration_ms = body.get("frame_duration_ms", MISSING_IMAGE_OPTION)
-    validate_gif_request(model, output_format, stream=bool(body.get("stream")))
+    validate_image_output_request(
+        model,
+        output_format,
+        stream=bool(body.get("stream")),
+        has_references=bool(images),
+    )
     return model, prompt, parse_image_count(body.get("n")), images, base_url, output_format, frame_count, frame_duration_ms
 
 
@@ -438,7 +443,7 @@ def text_completion_response(model: str, messages: list[dict[str, Any]], thinkin
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     if body.get("stream"):
         if is_image_chat_request(body):
-            validate_gif_request(
+            validate_image_output_request(
                 str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2",
                 body.get("output_format"),
                 stream=True,

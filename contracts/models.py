@@ -21,6 +21,7 @@ class ModelCatalogCapabilities(_StrictModel):
     image_upscale: bool = False
     high_resolution_image_models: tuple[str, ...] = ()
     gif_models: tuple[str, ...] = ()
+    image_max_n: int = Field(default=4, ge=1)
 
 
 class ModelCatalogSource(_StrictModel):
@@ -83,4 +84,6 @@ class ModelCatalogView(_StrictModel):
             for model in self.capabilities.high_resolution_image_models
         ):
             raise ValueError("high resolution models must be listed in image_models")
+        if any(model not in image_models for model in self.capabilities.gif_models):
+            raise ValueError("GIF models must be listed in image_models")
         return self

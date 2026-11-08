@@ -36,7 +36,7 @@ from services.log_service import (
     log_service,
 )
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
-from services.protocol.conversation import MISSING_IMAGE_OPTION, validate_gif_request
+from services.protocol.conversation import MISSING_IMAGE_OPTION, validate_image_output_request
 from services.realtime_monitor_service import realtime_monitor_service
 from services.storage.file_lock import interprocess_lock
 from utils.diagnostics import exception_diagnostic_fields
@@ -202,7 +202,10 @@ def _image_count(value: object) -> int:
         count = int(value or 1)
     except (TypeError, ValueError):
         count = 1
-    return min(4, max(1, count))
+    # Requests are validated at the API boundary.  Task records must preserve
+    # the requested count when the setting is later lowered, so historical
+    # tasks are never projected with a truncated count.
+    return max(1, count)
 
 
 def _owner_id(identity: dict[str, object]) -> str:
@@ -514,7 +517,9 @@ class ImageTaskService:
 
         queued_payload: dict[str, Any] | None = None
         try:
-            validate_gif_request(payload.get("model"), payload.get("output_format"))
+            validate_image_output_request(
+                payload.get("model"), payload.get("output_format"), has_references=mode == "edit",
+            )
             reservation = reservation or self.reserve_submission()
             queued_payload = self._prepare_queued_payload(mode, payload)
             task = {
@@ -1067,6 +1072,8 @@ class ImageTaskService:
                 raise ValueError("task is not in error state")
             if image_failure(_clean(task.get("error_code"))).code != "image_poll_timeout":
                 raise ValueError("task error is not a timeout error")
+            if _clean(task.get("output_format")).lower() == "svg":
+                raise ValueError("SVG tasks do not support image poll recovery")
             conversation_id = _clean(task.get("conversation_id"))
             if not conversation_id:
                 raise ValueError("task has no conversation_id")
