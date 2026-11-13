@@ -305,7 +305,7 @@ def iter_sse_payloads(
     started_at = time.monotonic()
     timeout_secs = float(max_duration_secs or 0)
     pending: bytes | None = None
-    aborted = False
+    closed = False
 
     def _timeout_error() -> TimeoutError:
         return TimeoutError(f"SSE stream exceeded {_format_timeout_secs(timeout_secs)}")
@@ -318,31 +318,38 @@ def iter_sse_payloads(
     def _raise_if_timeout() -> None:
         remaining = _remaining_secs()
         if remaining is not None and remaining <= 0:
-            _abort_stream_nonblocking()
             raise _timeout_error()
 
-    def _abort_stream_nonblocking() -> None:
-        """Cancel curl_cffi streaming without waiting for its stream task.
+    def _close_stream() -> None:
+        """Cancel reads without waiting for the peer to close the connection.
 
-        curl_cffi's Response.iter_content() blocks on an internal queue.get()
-        without a timeout. Calling response.close() from a watchdog can block on
-        stream_task.result(), so enforce our own deadline and only signal/close
-        the underlying curl handle here.
+        curl_cffi's Response.close() waits for stream_task.result(), even after
+        a logical SSE end. Signal cancellation now and release the curl handle
+        when that task exits (on the next write or its transport timeout).
+        Never close a handle while another thread is inside curl.perform().
         """
-        nonlocal aborted
-        aborted = True
-        try:
-            if getattr(response, "quit_now", None):
-                response.quit_now.set()
-        except Exception:
-            pass
-        try:
-            if getattr(response, "curl", None):
-                response.curl.close()
-        except Exception:
-            pass
-        try:
+        nonlocal closed
+        closed = True
+        if getattr(response, "_stream_closed", False):
+            return
+        stream_task = getattr(response, "stream_task", None)
+        if stream_task is not None:
+            # Keep callers' finally: response.close() idempotent/nonblocking.
             response._stream_closed = True
+            if getattr(response, "quit_now", None) is not None:
+                response.quit_now.set()
+
+            def release_curl(_task: Any) -> None:
+                try:
+                    if getattr(response, "curl", None) is not None:
+                        response.curl.close()
+                except Exception:
+                    pass
+
+            stream_task.add_done_callback(release_curl)
+            return
+        try:
+            response.close()
         except Exception:
             pass
 
@@ -361,10 +368,6 @@ def iter_sse_payloads(
                 _raise_if_timeout()
                 continue
             if isinstance(chunk, RequestException):
-                try:
-                    response.close()
-                except Exception:
-                    pass
                 raise chunk
             if chunk is STREAM_END:
                 break
@@ -384,6 +387,8 @@ def iter_sse_payloads(
         def _produce() -> None:
             try:
                 for item in response.iter_content():
+                    if closed:
+                        break
                     item_queue.put(item)
             except Exception as exc:
                 item_queue.put(exc)
@@ -422,6 +427,8 @@ def iter_sse_payloads(
                 payload = line[5:].strip()
                 if payload:
                     yield payload
+                    if payload == "[DONE]":
+                        return
         if pending:
             line = pending.decode("utf-8", errors="ignore") if isinstance(pending, bytes) else str(pending)
             if line.startswith("data:"):
@@ -430,15 +437,10 @@ def iter_sse_payloads(
                     yield payload
     except Exception as exc:
         if timeout_secs > 0 and _remaining_secs() is not None and _remaining_secs() <= 0 and not isinstance(exc, TimeoutError):
-            _abort_stream_nonblocking()
             raise _timeout_error() from exc
         raise
     finally:
-        if not aborted:
-            try:
-                response.close()
-            except Exception:
-                pass
+        _close_stream()
 
 
 def save_images_from_text(text: str, prefix: str) -> list[Path]:

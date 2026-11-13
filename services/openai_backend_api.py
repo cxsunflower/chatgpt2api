@@ -467,7 +467,9 @@ class OpenAIBackendAPI:
         structured terminal marker appears, the image flow can safely leave the
         SSE phase and use the existing conversation/task polling path.
         """
-        if not payload or payload == "[DONE]":
+        if payload == "[DONE]":
+            return True
+        if not payload:
             return False
         try:
             event = json.loads(payload)
@@ -492,11 +494,9 @@ class OpenAIBackendAPI:
         event_count = 0
         max_gap_ms = 0
         last_payload_preview = ""
+        payloads = iter_sse_payloads(response, max_duration_secs=max_duration_secs)
         try:
-            for payload in iter_sse_payloads(
-                response,
-                max_duration_secs=max_duration_secs,
-            ):
+            for payload in payloads:
                 now = time.perf_counter()
                 gap_ms = int((now - last_event_at) * 1000)
                 if event_count == 0:
@@ -507,6 +507,7 @@ class OpenAIBackendAPI:
                 last_payload_preview = diagnostic_excerpt(payload, 1000)
                 yield payload
         finally:
+            payloads.close()
             ended = time.perf_counter()
             last_gap_ms = int((ended - (last_event_at if event_count else started)) * 1000)
             if timing_key:
@@ -3488,10 +3489,9 @@ class OpenAIBackendAPI:
     ) -> tuple[list[str], list[str]]:
         """Poll the conversation document until image file ids appear or budget runs out.
 
-        - Sleeps image_poll_initial_wait_secs first (default 5s, +jitter). ChatGPT
-          image generation takes ~30s; polling immediately wastes requests and trips
-          a transient 429 the upstream returns within ~200ms of the SSE stream
-          closing (the conversation document is not yet committed).
+        - With no known output IDs, sleeps image_poll_initial_wait_secs first
+          (default 5s, +jitter) to let the conversation document commit. Known
+          outputs only wait when image_settle_enabled requests confirmation.
         - Subsequent polls are image_poll_interval_secs apart (default 5s).
         - Failures marked retryable by the canonical image-failure policy back
           off exponentially (capped at 16s, +jitter), honoring Retry-After.
@@ -3527,7 +3527,7 @@ class OpenAIBackendAPI:
             settle_for = min(config.image_settle_secs, max(0.0, _remaining()))
             if settle_for > 0:
                 self._sleep_for_image_poll(settle_for)
-        elif initial_wait > 0:
+        elif not has_initial_ids and initial_wait > 0:
             jitter = random.uniform(0, min(2.0, initial_wait * 0.2))
             sleep_for = min(initial_wait + jitter, max(0.0, _remaining()))
             if sleep_for > 0:
@@ -4264,12 +4264,13 @@ class OpenAIBackendAPI:
         self._report_progress("starting_generation")
         response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
         self._report_progress("generating")
+        payloads = self._iter_timed_sse_payloads(
+            response,
+            max_duration_secs=config.image_stream_timeout_secs,
+            timing_key="image_generation_stream",
+        )
         try:
-            for payload in self._iter_timed_sse_payloads(
-                response,
-                max_duration_secs=config.image_stream_timeout_secs,
-                timing_key="image_generation_stream",
-            ):
+            for payload in payloads:
                 yield payload
                 if self._is_image_stream_terminal_payload(payload):
                     logger.info({
@@ -4278,6 +4279,7 @@ class OpenAIBackendAPI:
                     })
                     break
         finally:
+            payloads.close()
             response.close()
 
     def _bootstrap(self, timeout_secs: float = 30.0) -> None:
