@@ -527,8 +527,6 @@ def build_image_prompt(
     option_hints = []
     if size:
         hints.append(f"输出图片尺寸为 {size}。")
-    if quality:
-        hints.append(f"输出图片质量为 {quality}。")
     normalized_output_format = normalize_image_output_format(output_format)
     if normalized_output_format:
         option_hints.append(f"生成格式为 {normalized_output_format}。")
