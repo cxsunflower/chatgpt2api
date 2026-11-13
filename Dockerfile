@@ -29,6 +29,7 @@ ARG TARGETARCH
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache \
     TZ=Asia/Shanghai \
     CHATGPT2API_BUILD_TYPE=release \
     CHATGPT2API_THREAD_TOKENS=120
@@ -52,6 +53,7 @@ RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
+RUN .venv/bin/python -c "import tiktoken; [tiktoken.get_encoding(name) for name in ('o200k_base', 'cl100k_base')]"
 
 COPY main.py ./
 COPY VERSION ./
